@@ -440,7 +440,7 @@ def is_command_allowed(cmd):
 
     cmd = cmd.strip()
 
-    # 检查禁止模式
+    # 检查禁止模式 - 危险命令直接拒绝
     for pattern in FORBIDDEN_PATTERNS:
         if re.search(pattern, cmd):
             return False, "禁止执行的危险命令: 匹配到 {}".format(pattern)
@@ -450,7 +450,18 @@ def is_command_allowed(cmd):
         if re.match(pattern, cmd):
             return True, "OK"
 
-    return False, "命令不在白名单中: {}".format(cmd[:50])
+    # 不在白名单中但不是危险命令 - 需要用户确认
+    return None, "命令不在白名单中，需要确认: {}".format(cmd[:50])
+
+def is_dangerous_command(cmd):
+    """检查是否是危险命令"""
+    if not cmd:
+        return True
+    cmd = cmd.strip()
+    for pattern in FORBIDDEN_PATTERNS:
+        if re.search(pattern, cmd):
+            return True
+    return False
 
 # 安全只读命令（不需要确认直接执行）
 SAFE_READONLY_PATTERNS = [
@@ -774,26 +785,29 @@ def execute_tool(tool_name, tool_input, dry_run=False):
         if dry_run:
             return "[Dry Run] 将执行命令: " + command
 
-        # 检查命令是否允许
+        # 检查命令是否在白名单中
         allowed, reason = is_command_allowed(command)
-        if not allowed:
+
+        if allowed == False:
+            # 危险命令，直接拒绝
             return "命令不允许: " + reason
 
-        # 安全只读命令直接执行，其他需要确认
+        # 安全只读命令直接执行
         if is_safe_readonly_command(command):
             print_msg("[执行] " + command, 'blue')
             output, error = execute_command(command)
             if error:
                 return "命令执行失败: " + error
             return output if output else "[命令无输出]"
-        else:
-            # 非只读命令需要确认
-            if not request_confirmation(command, "Bash"):
-                return "[已取消] 用户拒绝执行该命令"
+
+        # 不在白名单或非只读命令 → 让用户确认
+        if request_confirmation(command, "Bash"):
             output, error = execute_command(command)
             if error:
                 return "命令执行失败: " + error
             return output if output else "[命令无输出]"
+        else:
+            return "[已取消] 用户拒绝执行该命令"
 
     elif tool_name == "list_directory":
         path = tool_input.get("path", ".")
@@ -840,14 +854,31 @@ def setup_config():
     global API_URL, API_KEY, MODEL
 
     print_msg("""
-    ╔═══════════════════════════════════════════════════════╗
-    ║     Poor Man's DevOps Agent - 乞丐版运维助手           ║
-    ║     Poor Man's DevOps Agent                            ║
-    ║                                                       ║
-    ║  支持: 文件读取、命令执行、进程查看、日志分析          ║
-    ║  注意: 所有命令执行需要人工确认                        ║
-    ╚═══════════════════════════════════════════════════════╝
+     ██████╗ ██████╗ ███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ██╗     ██╗████████╗██╗ ██████╗ ███╗   ██╗
+    ██╔══██╗██╔══██╗██╔════╝████╗ ████║██║████╗  ██║██╔════╝ ██║     ██║╚══██╔══╝██║██╔═══██╗████╗  ██║
+    ██████╔╝██████╔╝███████╗██╔████╔██║██║██╔██╗ ██║██║  ███╗██║     ██║   ██║   ██║██║   ██║██╔██╗ ██║
+    ██╔═══╝ ██╔══██╗╚════██║██║╚██╔╝██║██║██║╚██╗██║██║   ██║██║     ██║   ██║   ██║██║   ██║██║╚██╗██║
+    ██║     ██║  ██║███████║██║ ╚═╝ ██║██║██║ ╚████║╚██████╔╝███████╗██║   ██║   ██║╚██████╔╝██║ ╚████║
+    ╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
+
+                                      ███████╗██████╗  ██████╗ ███████╗███████╗██╗██╗  ██╗   ██╗
+                                      ██╔════╝██╔══██╗██╔═══██╗██╔════╝██╔════╝██║██║  ██║   ██║
+                                      █████╗  ██████╔╝██║   ██║███████╗█████╗  ██║██║  ██║██╗██║
+                                      ██╔══╝  ██╔══██╗██║   ██║╚════██║██╔══╝  ██║██║  ██║╚████╔╝
+                                      ██║     ██║  ██║╚██████╔╝███████║███████╗██║╚█████╔╝ ╚██╔╝
+                                      ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚══════╝╚═╝ ╚════╝   ╚═╝
     """, 'cyan')
+
+    print_msg("  >> Poor Man's DevOps Agent <<", 'yellow')
+    print_msg("  >> AI-Powered | Command Whitelist | Human-in-the-Loop <<", 'white')
+    print()
+    print_msg("  [ Supported ]", 'green')
+    print_msg("  ├─ System   : ps, top, free, df, du, uptime", 'white')
+    print_msg("  ├─ Network  : curl, ping, netstat, ss, dig", 'white')
+    print_msg("  ├─ Docker   : ps, logs, inspect, stats, exec", 'white')
+    print_msg("  ├─ K8s      : get, describe, logs, top", 'white')
+    print_msg("  └─ Database : MySQL, PostgreSQL, Redis (read-only)", 'white')
+    print()
 
     # 从环境变量读取
     env_url = os.environ.get('DEBUGBOT_API_URL', '')
@@ -856,11 +887,14 @@ def setup_config():
 
     # 如果环境变量没设置，提示用户输入
     if not env_url or env_url == 'https://your-api-url/v1/chat/completions':
-        print_info("请输入 API 配置（或设置环境变量 DEBUGBOT_API_URL / DEBUGBOT_API_KEY）")
+        print_info("[ Config ] 请输入 API 配置（或设置环境变量 DEBUGBOT_API_URL / DEBUGBOT_API_KEY）")
         print()
-        API_URL = input("API URL: ").strip()
-        API_KEY = input("API Key: ").strip()
-        MODEL = input("Model (直接回车使用 gpt-4o): ").strip() or 'gpt-4o'
+        print_msg("  API Endpoint: ", 'white')
+        API_URL = input().strip()
+        print_msg("  API Key    : ", 'white')
+        API_KEY = input().strip()
+        print_msg("  Model      : ", 'white')
+        MODEL = input().strip() or 'gpt-4o'
     else:
         API_URL = env_url
         API_KEY = env_key
@@ -871,10 +905,13 @@ def setup_config():
         sys.exit(1)
 
     print()
-    print_info("API: {}".format(API_URL))
-    print_info("Model: {}".format(MODEL))
-    print_info("允许的路径: {}".format(', '.join(ALLOWED_PATHS[:5]) + ', ...'))
-    print_info("输入 'quit' 或 'exit' 退出程序")
+    print_msg("  [ Status ]", 'green')
+    print_msg("  ├─ Endpoint : {}".format(API_URL), 'white')
+    print_msg("  ├─ Model    : {}".format(MODEL), 'white')
+    print_msg("  ├─ Safe Mode: ENABLED (whitelist + human approval)", 'yellow')
+    print_msg("  └─ Allowed  : /home, /var/log, /etc, /tmp, /app, ...")
+    print()
+    print_msg("  Type 'quit' or 'exit' to exit | 'help' for usage", 'cyan')
     print()
 
 def main():
@@ -920,7 +957,8 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
     while True:
         try:
             # 获取用户输入
-            user_input = input("[你] ").strip()
+            print("[你]")
+            user_input = input().strip()
         except (KeyboardInterrupt, EOFError):
             print_info("\n再见!")
             break
