@@ -384,9 +384,23 @@ ALLOWED_PATHS = [
 
 MAX_FILE_SIZE = 1024 * 1024  # 最大读取 1MB
 MAX_OUTPUT_LINES = 500       # 最大输出行数
+MAX_TOOL_CONTENT = 8000      # 工具结果最大字符数（送给 LLM 的）
+MAX_DISPLAY_CHARS = 2000     # 终端显示截断字符数
 COMMAND_TIMEOUT = 30         # 命令超时秒数
+MAX_MESSAGES = 30            # 消息滑动窗口大小（超过后压缩）
 
 # ============== 工具函数 ==============
+
+def truncate_output(text, max_chars=MAX_TOOL_CONTENT):
+    """智能截断：保留首尾，中间用标记替代。避免丢失关键日志信息"""
+    if len(text) <= max_chars:
+        return text
+    head_size = max_chars * 2 // 3   # 前 2/3
+    tail_size = max_chars // 3       # 后 1/3
+    return (text[:head_size]
+            + "\n\n...[中间已截断，共 {} 字符，保留前 {} + 后 {} 字符]...\n\n".format(
+                len(text), head_size, tail_size)
+            + text[-tail_size:])
 
 def print_msg(msg, color=None):
     """带颜色的打印"""
@@ -553,11 +567,15 @@ def safe_read_file(filepath):
             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
 
-        # 限制行数
+        # 限制行数（保留首尾）
         lines = content.split('\n')
         if len(lines) > MAX_OUTPUT_LINES:
-            content = '\n'.join(lines[:MAX_OUTPUT_LINES])
-            content += "\n... (文件过长，已截断，显示前 {} 行)".format(MAX_OUTPUT_LINES)
+            head_lines = int(MAX_OUTPUT_LINES * 2 / 3)
+            tail_lines = MAX_OUTPUT_LINES - head_lines
+            content = '\n'.join(lines[:head_lines])
+            content += "\n\n...[文件过长，共 {} 行，保留前 {} + 后 {} 行]...\n\n".format(
+                len(lines), head_lines, tail_lines)
+            content += '\n'.join(lines[-tail_lines:])
 
         return content, None
     except Exception as e:
@@ -592,11 +610,15 @@ def execute_command(cmd, timeout=COMMAND_TIMEOUT):
         if err:
             output += "\n[STDERR]\n" + err
 
-        # 限制输出行数
+        # 限制输出行数（保留首尾）
         lines = output.split('\n')
         if len(lines) > MAX_OUTPUT_LINES:
-            output = '\n'.join(lines[:MAX_OUTPUT_LINES])
-            output += "\n... (输出过长，已截断)"
+            head_lines = int(MAX_OUTPUT_LINES * 2 / 3)
+            tail_lines = MAX_OUTPUT_LINES - head_lines
+            output = '\n'.join(lines[:head_lines])
+            output += "\n\n...[输出过长，共 {} 行，保留前 {} + 后 {} 行]...\n\n".format(
+                len(lines), head_lines, tail_lines)
+            output += '\n'.join(lines[-tail_lines:])
 
         return output if output else "[命令无输出]", None
     except subprocess.TimeoutExpired:
@@ -765,6 +787,26 @@ def get_tools():
                     }
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "env_snapshot",
+                "description": "一键收集当前环境快照信息（主机名、IP、内存、磁盘、进程、环境变量、网络端口等）。适合排查开始时快速了解环境状态。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "include_processes": {
+                            "type": "boolean",
+                            "description": "是否包含进程列表，默认 true"
+                        },
+                        "include_network": {
+                            "type": "boolean",
+                            "description": "是否包含网络连接信息，默认 true"
+                        }
+                    }
+                }
+            }
         }
     ]
 
@@ -837,7 +879,57 @@ def execute_tool(tool_name, tool_input, dry_run=False):
         except Exception as e:
             return "列出目录失败: " + str(e)
 
+    elif tool_name == "env_snapshot":
+        include_proc = tool_input.get("include_processes", True)
+        include_net = tool_input.get("include_network", True)
+        if dry_run:
+            return "[Dry Run] 将收集环境快照"
+        return run_env_snapshot(include_proc, include_net)
+
     return "[未知工具: {}]".format(tool_name)
+
+def run_env_snapshot(include_processes=True, include_network=True):
+    """执行环境快照，一键收集关键信息"""
+    sections = []
+
+    # 基础信息
+    commands_basic = [
+        ("== 主机名 ==", "hostname"),
+        ("== IP 地址 ==", "hostname -I 2>/dev/null || ifconfig 2>/dev/null | grep 'inet '"),
+        ("== 操作系统 ==", "cat /etc/os-release 2>/dev/null | head -5"),
+        ("== 内核版本 ==", "uname -a"),
+        ("== 运行时间 ==", "uptime"),
+        ("== 当前用户 ==", "whoami"),
+        ("== 工作目录 ==", "pwd"),
+        ("== 内存使用 ==", "free -h 2>/dev/null || cat /proc/meminfo | head -5"),
+        ("== 磁盘使用 ==", "df -h 2>/dev/null | head -20"),
+        ("== CPU 信息 ==", "nproc && cat /proc/loadavg"),
+        ("== 环境变量 ==", "env | sort"),
+    ]
+
+    commands_process = [
+        ("== 进程列表（按内存排序 Top 20）==", "ps aux --sort=-%mem 2>/dev/null | head -21 || ps aux | head -21"),
+    ]
+
+    commands_network = [
+        ("== 监听端口 ==", "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null"),
+        ("== 活跃连接数 ==", "ss -s 2>/dev/null || netstat -s 2>/dev/null | head -10"),
+    ]
+
+    all_commands = list(commands_basic)
+    if include_processes:
+        all_commands.extend(commands_process)
+    if include_network:
+        all_commands.extend(commands_network)
+
+    for title, cmd in all_commands:
+        output, error = execute_command(cmd, timeout=10)
+        if error:
+            sections.append("{}\n[获取失败: {}]".format(title, error))
+        else:
+            sections.append("{}\n{}".format(title, output))
+
+    return "\n".join(sections)
 
 def format_size(size):
     """格式化文件大小"""
@@ -877,7 +969,8 @@ def setup_config():
     print_msg("  ├─ Network  : curl, ping, netstat, ss, dig", 'white')
     print_msg("  ├─ Docker   : ps, logs, inspect, stats, exec", 'white')
     print_msg("  ├─ K8s      : get, describe, logs, top", 'white')
-    print_msg("  └─ Database : MySQL, PostgreSQL, Redis (read-only)", 'white')
+    print_msg("  ├─ Database : MySQL, PostgreSQL, Redis (read-only)", 'white')
+    print_msg("  └─ Snapshot : env_snapshot (一键环境快照)", 'white')
     print()
 
     # 从环境变量读取
@@ -928,6 +1021,13 @@ def main():
 2. 如果用户说"执行"或"帮我运行"，你可以执行以下命令
 3. 优先使用只读命令（cat, grep, tail, ps, docker logs 等）
 4. 不要执行任何修改数据的命令
+5. 排查开始时，建议先用 env_snapshot 工具一键收集环境信息
+
+可用工具：
+- read_file: 读取文件内容
+- run_command: 执行 Linux 命令
+- list_directory: 列出目录
+- env_snapshot: 一键收集环境快照（主机名、IP、内存、磁盘、进程、端口等）
 
 可用命令参考：
 - 查看日志: cat, tail, grep, journalctl, docker logs
@@ -968,6 +1068,7 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
 
         if user_input.lower() in ['quit', 'exit', 'q']:
             print_info("再见!")
+            print_warn("提醒：排查结束后建议删除 agent.py 避免 API Key 泄露：rm -f agent.py")
             break
 
         try:
@@ -977,6 +1078,20 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
             # 主循环：处理可能的多次 tool_calls
             max_tool_rounds = 10  # 防止无限循环
             for round_num in range(max_tool_rounds):
+                # 消息滑动窗口：超过 MAX_MESSAGES 时保留 system prompt + 最近消息
+                if len(messages) > MAX_MESSAGES:
+                    system_msg = messages[0]  # 保留 system prompt
+                    recent = messages[-(MAX_MESSAGES - 1):]
+                    messages.clear()
+                    messages.append(system_msg)
+                    # 添加一条摘要提示
+                    messages.append({
+                        "role": "user",
+                        "content": "[系统提示: 之前的对话轮次过多，已自动压缩。请基于当前上下文继续排查]"
+                    })
+                    messages.extend(recent)
+                    print_warn("对话轮次过多，已自动压缩上下文（保留最近 {} 条消息）".format(MAX_MESSAGES))
+
                 # 调用 LLM
                 print_msg("\n[思考中...]", 'magenta')
 
@@ -1024,17 +1139,19 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
                     # 执行工具
                     tool_result = execute_tool(func_name, func_args)
 
-                    # 添加工具结果
+                    # 添加工具结果（智能截断）
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call['id'],
-                        "content": tool_result[:4000]
+                        "content": truncate_output(tool_result)
                     })
 
+                    # 终端显示（较短截断）
                     print_msg("\n[工具结果]", 'green')
-                    print(tool_result[:1000])
-                    if len(tool_result) > 1000:
-                        print_msg("...(结果过长，已截断)", 'yellow')
+                    display_text = tool_result[:MAX_DISPLAY_CHARS]
+                    if len(tool_result) > MAX_DISPLAY_CHARS:
+                        display_text += "\n...(结果过长，终端已截断，完整内容已送给 LLM)"
+                    print(display_text)
 
                     # 继续循环，让 LLM 基于工具结果生成回复
 

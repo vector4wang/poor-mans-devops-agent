@@ -1,93 +1,219 @@
-# Poor Man's DevOps Agent
+```
+ ██████╗ ██████╗ ███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ██╗     ██╗████████╗██╗ ██████╗ ███╗   ██╗
+██╔══██╗██╔══██╗██╔════╝████╗ ████║██║████╗  ██║██╔════╝ ██║     ██║╚══██╔══╝██║██╔═══██╗████╗  ██║
+██████╔╝██████╔╝███████╗██╔████╔██║██║██╔██╗ ██║██║  ███╗██║     ██║   ██║   ██║██║   ██║██╔██╗ ██║
+██╔═══╝ ██╔══██╗╚════██║██║╚██╔╝██║██║██║╚██╗██║██║   ██║██║     ██║   ██║   ██║██║   ██║██║╚██╗██║
+██║     ██║  ██║███████║██║ ╚═╝ ██║██║██║ ╚████║╚██████╔╝███████╗██║   ██║   ██║╚██████╔╝██║ ╚████║
+╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
 
-[![Python](https://img.shields.io/badge/Python-2.7%2B%20%7C%203.x-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![GitHub Stars](https://img.shields.io/github/stars/vector4wang/poor-mans-devops-agent?style=flat&logo=github)](https://github.com/vector4wang/poor-mans-devops-agent)
-[![GitHub Issues](https://img.shields.io/badge/GitHub-Issues-orange.svg)](https://github.com/vector4wang/poor-mans-devops-agent/issues)
+                   ██████╗ ███████╗ ██████╗ █████╗  ██████╗██╗  ██╗███████╗
+                  ██╔══██╗██╔════╝██╔════╝██╔══██╗██╔════╝██║ ██╔╝██╔════╝
+                  ██║  ██║█████╗  ██║     ███████║██║     █████╔╝ █████╗
+                  ██║  ██║██╔══╝  ██║     ██╔══██║██║     ██╔═██╗ ██╔══╝
+                  ██████╔╝███████╗╚██████╗██║  ██║╚██████╗██║  ██╗███████╗
+                  ╚═════╝ ╚══════╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝
 
-[![AI](https://img.shields.io/badge/-AI%20DevOps%20Agent-f8f?style=for-the-badge&logo=robot&logoColor=fff)](#)
-[![DevOps](https://img.shields.io/badge/-DevOps-E34F26?style=for-the-badge&logo=dev-dot-to&logoColor=fff)](#)
-[![Python](https://img.shields.io/badge/-Python-3776AB?style=for-the-badge&logo=python&logoColor=fff)](#)
-[![CLI](https://img.shields.io/badge/-CLI-000000?style=for-the-badge&logo=gnome-terminal&logoColor=fff)](#)
-[![OpenSource](https://img.shields.io/badge/-Open%20Source-85EA0D?style=for-the-badge&logo=open-source-initiative&logoColor=000)](#)
-
-> 花小钱办大事。没预算买 DataDog？扔上去一个脚本照样能 Debug！
-
-**乞丐版运维助手** - 单文件 AI Debug Agent，支持 Python 2.7+ / 3.x，`scp` 上传即用。
-
-## 快速开始
-
-```bash
-git clone https://github.com/vector4wang/poor-mans-devops-agent.git
-cd poor-mans-devops-agent
-python agent.py
+                                █████╗  ██████╗ ███████╗███╗   ██╗████████╗
+                               ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝
+                               ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║
+                               ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║
+                               ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║
+                               ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝
 ```
 
-或直接：
+<p align="center">
+  <strong>花小钱办大事。没预算买 DataDog？扔上去一个脚本照样能 Debug！</strong>
+</p>
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/vector4wang/poor-mans-devops-agent/main/agent.py | python -
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-2.7%2B%20%7C%203.x-blue.svg" alt="Python">
+  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
+  <img src="https://img.shields.io/badge/Single%20File-Yes!-brightgreen" alt="Single File">
+  <img src="https://img.shields.io/badge/Zero%20Dependencies-Yes!-orange" alt="Zero Dependencies">
+</p>
+
+---
+
+## 📖 背景
+
+在 K8s 集群中运行的 Python 服务出了问题，你需要 `kubectl exec` 进容器排查。但你不是专业运维，面对一堆 Linux 命令、Docker 操作、日志分析，不一定能马上想到该跑什么。
+
+**Poor Man's DevOps Agent** 就是为这个场景设计的：
+
+> 把 `agent.py` 扔进容器，配好公司内网的 LLM 地址，就能用自然语言和 AI 对话式排查问题。
+
+它不是要替代专业运维工具，而是给**开发人员**、**测试人员**、**值班但非运维背景的同学**提供一个"能聊天的排查助手"——你描述问题，它告诉你该跑什么命令，甚至直接帮你执行和分析结果。
+
+```
+你：服务响应很慢，帮我看看
+Agent：[自动执行 docker stats / ps / netstat]
+       CPU 占用 89%，疑似 GC 停顿。建议执行 jstack 抓线程快照...
 ```
 
-## 配置
+---
 
-**方式一：环境变量**
+## 🚀 快速开始
+
+### 方式一：直接 scp 进容器（推荐）
+
 ```bash
-export DEBUGBOT_API_URL="https://api.deepseek.com/chat/completions"
+# 本地
+scp agent.py user@k8s-node:/tmp/
+
+# 进容器
+kubectl exec -it my-pod -- bash
+
+# 容器内
+export DEBUGBOT_API_URL="https://your-internal-llm/v1/chat/completions"
 export DEBUGBOT_API_KEY="sk-xxxxx"
 export DEBUGBOT_MODEL="deepseek-chat"
+python /tmp/agent.py
+```
+
+### 方式二：一键下载
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vector4wang/poor-mans-devops-agent/main/agent.py -o agent.py
 python agent.py
 ```
 
-**方式二：运行时输入**
+### 方式三：运行时交互输入
 
 ```bash
-$ python agent.py
-
-API Endpoint: https://api.deepseek.com/chat/completions
-API Key    : sk-xxxxx
-Model      : deepseek-chat
+python agent.py
+# 启动后会提示你输入 API 地址和 Key
 ```
 
-## 支持的模型
+---
 
-OpenAI 兼容 API 均可使用：
+## ⚙️ 配置
+
+| 环境变量 | 说明 | 示例 |
+|----------|------|------|
+| `DEBUGBOT_API_URL` | LLM API 地址 | `https://your-llm/v1/chat/completions` |
+| `DEBUGBOT_API_KEY` | API Key | `sk-xxxxx` |
+| `DEBUGBOT_MODEL` | 模型名称 | `deepseek-chat`, `gpt-4o`, `qwen-turbo` |
+
+**支持的模型**：任何 OpenAI 兼容 API 均可使用。
 
 | 类型 | 示例 |
 |------|------|
-| **云服务** | DeepSeek, OpenAI, 阿里通义, 智谱GLM, Kimi, 豆包, 讯飞星火 |
-| **本地部署** | Ollama, vLLM, LocalAI, xinference |
+| 云服务 | DeepSeek, OpenAI, 阿里通义, 智谱GLM, Kimi, 豆包, 讯飞星火 |
+| 本地部署 | Ollama, vLLM, LocalAI, xinference |
 
-## 安全机制
+---
 
-| 机制 | 说明 |
+## 🛠️ 功能一览
+
+| 工具 | 说明 |
 |------|------|
-| 命令白名单 | 只允许只读/诊断命令 |
-| 危险拦截 | `rm -rf /`, `dd`, `shutdown` 等直接阻断 |
-| 人工确认 | 敏感操作执行前需确认 |
-| 路径限制 | 只允许访问 `/home`, `/var/log`, `/etc` 等目录 |
+| `read_file` | 读取文件内容（自动截断大文件，保留首尾） |
+| `run_command` | 执行命令（白名单校验 + 危险命令拦截 + 人工确认） |
+| `list_directory` | 列出目录结构 |
+| `env_snapshot` | **一键环境快照**（主机名/IP/内存/磁盘/进程/端口/环境变量） |
 
-## 使用示例
+### 支持的命令分类
+
+| 分类 | 命令 |
+|------|------|
+| 系统 | `ps`, `top`, `free`, `df`, `du`, `uptime`, `vmstat`, `iostat` |
+| 网络 | `curl`, `ping`, `netstat`, `ss`, `dig`, `nslookup`, `traceroute` |
+| 日志 | `cat`, `grep`, `tail`, `head`, `journalctl`, `dmesg` |
+| Docker | `ps`, `logs`, `inspect`, `stats`, `exec`, `images` |
+| K8s | `get`, `describe`, `logs`, `top`, `events`, `cluster-info` |
+| 数据库 | MySQL, PostgreSQL, Redis（只读查询） |
+| 中间件 | RabbitMQ, Kafka, ZooKeeper, etcd |
+
+---
+
+## 🔒 安全机制
+
+> **三层防护**：危险拦截 → 命令白名单 → 人工确认
+
+| 层级 | 机制 | 说明 |
+|------|------|------|
+| 🔴 **硬拦截** | `FORBIDDEN_PATTERNS` | `rm -rf /`, `dd of=/dev/`, `shutdown`, `mkfs` 等直接拒绝 |
+| 🟡 **白名单** | `ALLOWED_COMMANDS` | 只有白名单内的命令可以执行，其他需用户确认 |
+| 🟢 **免确认** | `SAFE_READONLY_PATTERNS` | `cat`, `grep`, `ps`, `docker logs` 等只读命令直接放行 |
+
+---
+
+## 💬 使用示例
 
 ```
-[你] 服务响应很慢，帮我看看
+[你] 帮我看看这个容器为什么 CPU 这么高
 
-[执行] docker stats --no-stream
-[执行] docker logs my-service --tail=50
+[思考中...]
 
-[助手] CPU 占用 89%，可能是 GC 停顿或死循环。建议：
-  docker exec my-service jstack
+[调用工具: env_snapshot]
+== 内存使用 ==
+              total    used    free
+Mem:          7.8G    6.2G    1.6G
+
+== 进程列表（按内存排序 Top 20）==
+USER   PID  %CPU %MEM  COMMAND
+root   1    89.2 45.3  python app.py
+
+[助手] CPU 89%，内存占 45%，进程是 python app.py。
+       可能是：
+       1. 内存泄漏导致频繁 GC
+       2. 死循环
+       建议执行：docker exec <container> py-spy dump --pid 1
 ```
 
-## 支持的命令
+---
 
-- **系统**: `ps`, `top`, `free`, `df`, `du`, `uptime`
-- **网络**: `curl`, `ping`, `netstat`, `ss`, `dig`, `tcpdump`
-- **日志**: `cat`, `grep`, `tail`, `journalctl`, `dmesg`
-- **Docker**: `ps`, `logs`, `inspect`, `stats`, `exec`
-- **K8s**: `get`, `describe`, `logs`, `top`
-- **数据库**: MySQL, PostgreSQL, Redis 只读查询
+## 📐 架构
 
-## License
+```
+┌─────────────────────────────────────────────┐
+│                  用户 (CLI)                  │
+└──────────────────┬──────────────────────────┘
+                   │ 自然语言描述问题
+                   ▼
+┌─────────────────────────────────────────────┐
+│              LLM (公司内网)                  │
+│         OpenAI Function Calling              │
+└──────────────────┬──────────────────────────┘
+                   │ tool_calls
+                   ▼
+┌─────────────────────────────────────────────┐
+│             安全校验层                        │
+│  ┌──────────┐ ┌──────────┐ ┌─────────────┐ │
+│  │ FORBIDDEN │ │ WHITELIST│ │  SAFE_RO    │ │
+│  │ (硬拦截)  │→│ (白名单) │→│ (免确认)    │ │
+│  └──────────┘ └──────────┘ └─────────────┘ │
+└──────────────────┬──────────────────────────┘
+                   │ 通过校验
+                   ▼
+┌─────────────────────────────────────────────┐
+│           命令执行 (subprocess)               │
+│   cat / grep / ps / docker / kubectl / ...   │
+└──────────────────┬──────────────────────────┘
+                   │ 执行结果
+                   ▼
+┌─────────────────────────────────────────────┐
+│      LLM 分析结果 → 给出排查建议              │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## ⚠️ 免责声明
+
+**本项目仅供学习和内部排查使用，使用者需自行承担风险。**
+
+1. **非生产级工具**：本工具设计用于临时排查场景，不建议作为长期运行的服务部署。
+2. **API Key 安全**：脚本中可能包含 API Key，排查结束后**务必删除**（`rm -f agent.py`），避免 Key 泄露。
+3. **命令执行风险**：尽管有白名单和危险拦截机制，但无法覆盖所有边界情况。**LLM 生成的命令仍需人工确认**后再执行，尤其是涉及写操作的命令。
+4. **数据安全**：本工具会读取容器内的文件、环境变量、进程信息等。请确保在合规授权范围内使用，不要在非授权环境中运行。
+5. **LLM 输出不可控**：AI 给出的分析和建议可能不准确，仅作为排查参考，不保证 100% 正确。关键决策请以实际情况和专业判断为准。
+6. **无担保**：本工具按 "原样" 提供，不做任何明示或暗示的保证，包括但不限于对适销性、特定用途适用性的保证。
+
+**使用本工具即表示你理解并同意以上条款。**
+
+---
+
+## 📜 License
 
 MIT
