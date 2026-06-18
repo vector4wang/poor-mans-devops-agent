@@ -1,5 +1,16 @@
 # Poor Man's DevOps Agent
 
+[![Python](https://img.shields.io/badge/Python-2.7%2B%20%7C%203.x-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/vector4wang/poor-mans-devops-agent?style=flat&logo=github)](https://github.com/vector4wang/poor-mans-devops-agent)
+[![GitHub Issues](https://img.shields.io/badge/GitHub-Issues-orange.svg)](https://github.com/vector4wang/poor-mans-devops-agent/issues)
+
+[![AI](https://img.shields.io/badge/-AI%20DevOps%20Agent-f8f?style=for-the-badge&logo=robot&logoColor=fff)](#)
+[![DevOps](https://img.shields.io/badge/-DevOps-E34F26?style=for-the-badge&logo=dev-dot-to&logoColor=fff)](#)
+[![Python](https://img.shields.io/badge/-Python-3776AB?style=for-the-badge&logo=python&logoColor=fff)](#)
+[![CLI](https://img.shields.io/badge/-CLI-000000?style=for-the-badge&logo=gnome-terminal&logoColor=fff)](#)
+[![OpenSource](https://img.shields.io/badge/-Open%20Source-85EA0D?style=for-the-badge&logo=open-source-initiative&logoColor=000)](#)
+
 > 花小钱办大事。没预算买 DataDog？扔上去一个脚本照样能 Debug！
 
 **乞丐版运维助手** - 单文件 AI Debug Agent，支持 Python 2.7+ / 3.x，`scp` 上传即用。
