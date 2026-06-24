@@ -7,13 +7,16 @@ Poor Man's DevOps Agent - A lightweight production debugging assistant
 支持 Python 2.7+ 和 Python 3.x
 
 使用方法:
-    # 方式一：运行时输入配置
-    python agent.py
+    # 方式一：命令行参数
+    python agent.py --api-url https://your-api-url/v1/chat/completions --api-key your-api-key --model gpt-4o
 
     # 方式二：设置环境变量
     export DEBUGBOT_API_URL="https://your-api-url/v1/chat/completions"
     export DEBUGBOT_API_KEY="your-api-key"
     export DEBUGBOT_MODEL="gpt-4o"
+    python agent.py
+
+    # 方式三：运行时交互输入
     python agent.py
 """
 
@@ -26,6 +29,7 @@ import subprocess
 import re
 import time
 import ssl
+import argparse
 
 # Python 2/3 兼容
 PY2 = sys.version_info[0] == 2
@@ -673,7 +677,7 @@ def call_llm(messages, tools=None):
         payload['thinking'] = {"type": "disabled"}
 
     # 调试模式：打印发送的消息
-    if '--debug' in sys.argv:
+    if ARGS.debug:
         print_msg("\n[DEBUG] 发送的消息:", 'magenta')
         for i, msg in enumerate(messages):
             role = msg.get('role')
@@ -943,7 +947,14 @@ def format_size(size):
 
 def setup_config():
     """运行时配置"""
-    global API_URL, API_KEY, MODEL
+    global API_URL, API_KEY, MODEL, ARGS
+
+    parser = argparse.ArgumentParser(description="Poor Man's DevOps Agent")
+    parser.add_argument('--api-url', default=None, help='API endpoint')
+    parser.add_argument('--api-key', default=None, help='API key')
+    parser.add_argument('--model', default=None, help='Model name')
+    parser.add_argument('--debug', action='store_true', help='Debug mode')
+    ARGS = parser.parse_args()
 
     print_msg("""
      ██████╗ ██████╗ ███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ██╗     ██╗████████╗██╗ ██████╗ ███╗   ██╗
@@ -973,13 +984,20 @@ def setup_config():
     print_msg("  └─ Snapshot : env_snapshot (一键环境快照)", 'white')
     print()
 
-    # 从环境变量读取
+    # 优先级: CLI args > env vars > 交互输入
+    cli_url = ARGS.api_url
+    cli_key = ARGS.api_key
+    cli_model = ARGS.model
     env_url = os.environ.get('DEBUGBOT_API_URL', '')
     env_key = os.environ.get('DEBUGBOT_API_KEY', '')
     env_model = os.environ.get('DEBUGBOT_MODEL', '')
 
-    # 如果环境变量没设置，提示用户输入
-    if not env_url or env_url == 'https://your-api-url/v1/chat/completions':
+    API_URL = cli_url or env_url
+    API_KEY = cli_key or env_key
+    MODEL = cli_model or env_model or 'gpt-4o'
+
+    # 都没提供才走交互输入
+    if not API_URL or not API_KEY:
         print_info("[ Config ] 请输入 API 配置（或设置环境变量 DEBUGBOT_API_URL / DEBUGBOT_API_KEY）")
         print()
         print_msg("  API Endpoint: ", 'white')
@@ -988,10 +1006,6 @@ def setup_config():
         API_KEY = input().strip()
         print_msg("  Model      : ", 'white')
         MODEL = input().strip() or 'gpt-4o'
-    else:
-        API_URL = env_url
-        API_KEY = env_key
-        MODEL = env_model or 'gpt-4o'
 
     if not API_URL or not API_KEY:
         print_error("API URL 和 API Key 不能为空!")
@@ -1160,7 +1174,7 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
             break
         except Exception as e:
             print_error("发生错误: " + str(e))
-            if '--debug' in sys.argv:
+            if ARGS.debug:
                 import traceback
                 traceback.print_exc()
 
