@@ -4,7 +4,7 @@
 Poor Man's DevOps Agent - 乞丐版运维助手
 Poor Man's DevOps Agent - A lightweight production debugging assistant
 
-支持 Python 2.7+ 和 Python 3.x
+支持 Python 3.6+
 
 使用方法:
     # 方式一：命令行参数
@@ -20,8 +20,6 @@ Poor Man's DevOps Agent - A lightweight production debugging assistant
     python agent.py
 """
 
-from __future__ import print_function, absolute_import
-
 import os
 import sys
 import json
@@ -31,16 +29,8 @@ import time
 import ssl
 import argparse
 
-# Python 2/3 兼容
-PY2 = sys.version_info[0] == 2
-
-if PY2:
-    input = raw_input
-    import urllib2 as urllib
-else:
-    from urllib.parse import urlencode
-    from urllib.request import Request, urlopen
-    from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 # ============== 配置区 ==============
 API_URL = os.environ.get('DEBUGBOT_API_URL', 'https://your-api-url/v1/chat/completions')
@@ -392,6 +382,7 @@ MAX_TOOL_CONTENT = 8000      # 工具结果最大字符数（送给 LLM 的）
 MAX_DISPLAY_CHARS = 2000     # 终端显示截断字符数
 COMMAND_TIMEOUT = 30         # 命令超时秒数
 MAX_MESSAGES = 30            # 消息滑动窗口大小（超过后压缩）
+COMPRESS_KEEP_RECENT = 10   # 压缩时保留最近 N 条消息，其余用 LLM 摘要替代
 
 # ============== 工具函数 ==============
 
@@ -405,6 +396,27 @@ def truncate_output(text, max_chars=MAX_TOOL_CONTENT):
             + "\n\n...[中间已截断，共 {} 字符，保留前 {} + 后 {} 字符]...\n\n".format(
                 len(text), head_size, tail_size)
             + text[-tail_size:])
+
+def strip_markdown(text):
+    """洗掉 Markdown 语法，适合终端显示"""
+    import re as _re
+    # 去掉 **bold** 和 *italic*
+    text = _re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\1', text)
+    # 去掉 `code` 标记
+    text = _re.sub(r'`([^`]+)`', r'\1', text)
+    # 去掉 ## ### 标题标记
+    text = _re.sub(r'^#{1,6}\s+', '', text, flags=_re.MULTILINE)
+    # 去掉 Markdown 表格的 | 分隔线（保留内容）
+    # 先处理表头分隔行 |---|---| 这种
+    text = _re.sub(r'^\|[\s\-:|]+\|$', '', text, flags=_re.MULTILINE)
+    # 去掉表格每行的首尾 |
+    text = _re.sub(r'^\|(.+)\|$', r'  \1', text, flags=_re.MULTILINE)
+    # 去掉水平线 --- *** ===
+    text = _re.sub(r'^[\-*=_]{3,}\s*$', '', text, flags=_re.MULTILINE)
+    # 去掉多余空行
+    text = _re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 def print_msg(msg, color=None):
     """带颜色的打印"""
@@ -427,13 +439,13 @@ def print_error(msg):
     print_msg("[ERROR] " + msg, 'red')
 
 def print_warn(msg):
-    print_msg("[WARN] " + msg, 'yellow')
+    print_msg("[WARN]  " + msg, 'yellow')
 
 def print_info(msg):
-    print_msg("[INFO] " + msg, 'cyan')
+    print_msg("[INFO]  " + msg, 'cyan')
 
 def print_success(msg):
-    print_msg("[OK] " + msg, 'green')
+    print_msg("[OK]    " + msg, 'green')
 
 def is_path_allowed(path):
     """检查路径是否在允许范围内"""
@@ -470,16 +482,6 @@ def is_command_allowed(cmd):
 
     # 不在白名单中但不是危险命令 - 需要用户确认
     return None, "命令不在白名单中，需要确认: {}".format(cmd[:50])
-
-def is_dangerous_command(cmd):
-    """检查是否是危险命令"""
-    if not cmd:
-        return True
-    cmd = cmd.strip()
-    for pattern in FORBIDDEN_PATTERNS:
-        if re.search(pattern, cmd):
-            return True
-    return False
 
 # 安全只读命令（不需要确认直接执行）
 SAFE_READONLY_PATTERNS = [
@@ -564,11 +566,7 @@ def safe_read_file(filepath):
         if size > MAX_FILE_SIZE:
             return None, "文件超过 {} 字节限制".format(MAX_FILE_SIZE)
 
-        if PY2:
-            with open(filepath, 'r') as f:
-                content = f.read().decode('utf-8', errors='ignore')
-        else:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
 
         # 限制行数（保留首尾）
@@ -588,25 +586,15 @@ def safe_read_file(filepath):
 def execute_command(cmd, timeout=COMMAND_TIMEOUT):
     """安全执行命令"""
     try:
-        if PY2:
-            process = subprocess.Popen(
-                cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE
-            )
-            stdout, stderr = process.communicate(timeout=timeout)
-        else:
-            process = subprocess.Popen(
-                cmd,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE,
-                cwd=os.getcwd()
-            )
-            stdout, stderr = process.communicate(timeout=timeout)
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            cwd=os.getcwd()
+        )
+        stdout, stderr = process.communicate(timeout=timeout)
 
         output = stdout.decode('utf-8', errors='ignore')
         err = stderr.decode('utf-8', errors='ignore')
@@ -633,13 +621,12 @@ def execute_command(cmd, timeout=COMMAND_TIMEOUT):
 
 def request_confirmation(cmd, tool_name):
     """请求用户确认"""
-    print()  # 空行
-    print_msg("=" * 60, 'yellow')
-    print_msg("[{}] 需要执行以下操作:".format(tool_name), 'yellow')
-    print_msg("=" * 60, 'yellow')
-    print_msg(cmd, 'white')
-    print_msg("=" * 60, 'yellow')
-    print()  # 空行
+    print()
+    print_msg("  +" + "-" * 56 + "+", 'yellow')
+    print_msg("  | {} — 需要确认:".format(tool_name), 'yellow')
+    print_msg("  | " + cmd, 'white')
+    print_msg("  +" + "-" * 56 + "+", 'yellow')
+    print()
 
     while True:
         try:
@@ -659,7 +646,7 @@ def request_confirmation(cmd, tool_name):
 
 # ============== LLM API 调用 ==============
 
-def call_llm(messages, tools=None):
+def call_llm(messages, tools=None, temperature=0.7, max_tokens=None):
     """调用 LLM API"""
     headers = {
         'Content-Type': 'application/json',
@@ -669,8 +656,11 @@ def call_llm(messages, tools=None):
     payload = {
         'model': MODEL,
         'messages': messages,
-        'temperature': 0.7,
+        'temperature': temperature,
     }
+
+    if max_tokens:
+        payload['max_tokens'] = max_tokens
 
     # DeepSeek 特殊参数：禁用思考模式
     if 'deepseek' in API_URL.lower():
@@ -692,10 +682,7 @@ def call_llm(messages, tools=None):
     if tools:
         payload['tools'] = tools
 
-    if PY2:
-        data = json.dumps(payload)
-    else:
-        data = json.dumps(payload).encode('utf-8')
+    data = json.dumps(payload).encode('utf-8')
 
     # 重试机制
     max_retries = 3
@@ -703,19 +690,12 @@ def call_llm(messages, tools=None):
         try:
             req = Request(API_URL, data=data, headers=headers)
 
-            # Python 3: 更好的 SSL 配置
-            if not PY2:
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-                response = urlopen(req, timeout=120, context=ssl_context)
-            else:
-                response = urlopen(req, timeout=120)
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            response = urlopen(req, timeout=120, context=ssl_context)
 
-            if PY2:
-                result = response.read().decode('utf-8')
-            else:
-                result = response.read().decode('utf-8')
+            result = response.read().decode('utf-8')
 
             return json.loads(result), None
 
@@ -725,17 +705,57 @@ def call_llm(messages, tools=None):
         except URLError as e:
             if attempt < max_retries - 1:
                 print_warn("连接失败，{} 秒后重试... ({}/{})".format(2 ** attempt, attempt + 1, max_retries))
-                import time
                 time.sleep(2 ** attempt)
                 continue
             return None, "URL Error: " + str(e.reason)
         except Exception as e:
             if attempt < max_retries - 1:
                 print_warn("请求失败，重试中... ({}/{})".format(attempt + 1, max_retries))
-                import time
                 time.sleep(2 ** attempt)
                 continue
             return None, "Error: " + str(e)
+
+# ============== 上下文压缩 ==============
+
+def compress_history(old_messages):
+    """用 LLM 将历史消息压缩为摘要，保留关键排查信息"""
+    compress_prompt = """你是一个运维排查助手，请将以下对话历史压缩为一段简洁的摘要。
+
+要求：
+1. 保留用户最初的问题是什么
+2. 保留已经执行了哪些关键命令及其重要发现
+3. 保留已经得出的结论和排查方向
+4. 保留当前待解决的问题
+5. 忽略冗余的对话细节和无关内容
+6. 用中文输出，控制在 500 字以内
+
+对话历史：
+---
+"""
+    for msg in old_messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if role == "tool":
+            content = content[:500] + ("..." if len(content) > 500 else "")
+        compress_prompt += "\n[{}]: {}".format(role, content)
+
+    compress_prompt += "\n---\n请输出摘要："
+
+    try:
+        result, error = call_llm(
+            [{"role": "user", "content": compress_prompt}],
+            tools=None,
+            temperature=0.3,
+            max_tokens=600,
+        )
+        if error:
+            print_warn("历史压缩失败: {}".format(error))
+            return None
+        summary = result["choices"][0]["message"]["content"]
+        return summary.strip()
+    except Exception as e:
+        print_warn("历史压缩失败: {}".format(e))
+        return None
 
 # ============== 工具定义 ==============
 
@@ -814,12 +834,10 @@ def get_tools():
         }
     ]
 
-def execute_tool(tool_name, tool_input, dry_run=False):
+def execute_tool(tool_name, tool_input):
     """执行工具"""
     if tool_name == "read_file":
         filepath = tool_input.get("filepath", "")
-        if dry_run:
-            return "[Dry Run] 将读取文件: " + filepath
 
         content, error = safe_read_file(filepath)
         if error:
@@ -828,8 +846,6 @@ def execute_tool(tool_name, tool_input, dry_run=False):
 
     elif tool_name == "run_command":
         command = tool_input.get("command", "")
-        if dry_run:
-            return "[Dry Run] 将执行命令: " + command
 
         # 检查命令是否在白名单中
         allowed, reason = is_command_allowed(command)
@@ -840,7 +856,6 @@ def execute_tool(tool_name, tool_input, dry_run=False):
 
         # 安全只读命令直接执行
         if is_safe_readonly_command(command):
-            print_msg("[执行] " + command, 'blue')
             output, error = execute_command(command)
             if error:
                 return "命令执行失败: " + error
@@ -857,8 +872,6 @@ def execute_tool(tool_name, tool_input, dry_run=False):
 
     elif tool_name == "list_directory":
         path = tool_input.get("path", ".")
-        if dry_run:
-            return "[Dry Run] 将列出目录: " + path
 
         if not is_path_allowed(path):
             return "路径不在允许范围内"
@@ -886,8 +899,6 @@ def execute_tool(tool_name, tool_input, dry_run=False):
     elif tool_name == "env_snapshot":
         include_proc = tool_input.get("include_processes", True)
         include_net = tool_input.get("include_network", True)
-        if dry_run:
-            return "[Dry Run] 将收集环境快照"
         return run_env_snapshot(include_proc, include_net)
 
     return "[未知工具: {}]".format(tool_name)
@@ -957,31 +968,20 @@ def setup_config():
     ARGS = parser.parse_args()
 
     print_msg("""
-     ██████╗ ██████╗ ███████╗███╗   ███╗██╗███╗   ██╗ ██████╗ ██╗     ██╗████████╗██╗ ██████╗ ███╗   ██╗
-    ██╔══██╗██╔══██╗██╔════╝████╗ ████║██║████╗  ██║██╔════╝ ██║     ██║╚══██╔══╝██║██╔═══██╗████╗  ██║
-    ██████╔╝██████╔╝███████╗██╔████╔██║██║██╔██╗ ██║██║  ███╗██║     ██║   ██║   ██║██║   ██║██╔██╗ ██║
-    ██╔═══╝ ██╔══██╗╚════██║██║╚██╔╝██║██║██║╚██╗██║██║   ██║██║     ██║   ██║   ██║██║   ██║██║╚██╗██║
-    ██║     ██║  ██║███████║██║ ╚═╝ ██║██║██║ ╚████║╚██████╔╝███████╗██║   ██║   ██║╚██████╔╝██║ ╚████║
-    ╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
-
-                                      ███████╗██████╗  ██████╗ ███████╗███████╗██╗██╗  ██╗   ██╗
-                                      ██╔════╝██╔══██╗██╔═══██╗██╔════╝██╔════╝██║██║  ██║   ██║
-                                      █████╗  ██████╔╝██║   ██║███████╗█████╗  ██║██║  ██║██╗██║
-                                      ██╔══╝  ██╔══██╗██║   ██║╚════██║██╔══╝  ██║██║  ██║╚████╔╝
-                                      ██║     ██║  ██║╚██████╔╝███████║███████╗██║╚█████╔╝ ╚██╔╝
-                                      ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚══════╝╚═╝ ╚════╝   ╚═╝
+    ╔══════════════════════════════════════════════════════════════╗
+    ║        Poor Man's DevOps Agent  —  乞丐版运维助手             ║
+    ║        AI-Powered | Command Whitelist | Human-in-the-Loop   ║
+    ╚══════════════════════════════════════════════════════════════╝
     """, 'cyan')
 
-    print_msg("  >> Poor Man's DevOps Agent <<", 'yellow')
-    print_msg("  >> AI-Powered | Command Whitelist | Human-in-the-Loop <<", 'white')
-    print()
-    print_msg("  [ Supported ]", 'green')
-    print_msg("  ├─ System   : ps, top, free, df, du, uptime", 'white')
-    print_msg("  ├─ Network  : curl, ping, netstat, ss, dig", 'white')
-    print_msg("  ├─ Docker   : ps, logs, inspect, stats, exec", 'white')
-    print_msg("  ├─ K8s      : get, describe, logs, top", 'white')
-    print_msg("  ├─ Database : MySQL, PostgreSQL, Redis (read-only)", 'white')
-    print_msg("  └─ Snapshot : env_snapshot (一键环境快照)", 'white')
+    print_msg("  Supported Tools", 'green')
+    print_msg("  ┌──────────────┬───────────────────────────────────────────┐", 'white')
+    print_msg("  │ System       │ ps, top, free, df, du, uptime, env       │", 'white')
+    print_msg("  │ Network      │ curl, ping, netstat, ss, dig, nslookup   │", 'white')
+    print_msg("  │ Docker / K8s │ ps, logs, inspect, stats, get, describe  │", 'white')
+    print_msg("  │ Database     │ MySQL, PostgreSQL, Redis (read-only)     │", 'white')
+    print_msg("  │ Snapshot     │ env_snapshot — 一键收集环境快照           │", 'white')
+    print_msg("  └──────────────┴───────────────────────────────────────────┘", 'white')
     print()
 
     # 优先级: CLI args > env vars > 交互输入
@@ -998,27 +998,28 @@ def setup_config():
 
     # 都没提供才走交互输入
     if not API_URL or not API_KEY:
-        print_info("[ Config ] 请输入 API 配置（或设置环境变量 DEBUGBOT_API_URL / DEBUGBOT_API_KEY）")
+        print_info("请输入 API 配置（或设置环境变量 DEBUGBOT_API_URL / DEBUGBOT_API_KEY）")
         print()
         print_msg("  API Endpoint: ", 'white')
-        API_URL = input().strip()
-        print_msg("  API Key    : ", 'white')
-        API_KEY = input().strip()
-        print_msg("  Model      : ", 'white')
-        MODEL = input().strip() or 'gpt-4o'
+        API_URL = input("  > ").strip()
+        print_msg("  API Key:      ", 'white')
+        API_KEY = input("  > ").strip()
+        print_msg("  Model:        ", 'white')
+        MODEL = input("  > ").strip() or 'gpt-4o'
 
     if not API_URL or not API_KEY:
         print_error("API URL 和 API Key 不能为空!")
         sys.exit(1)
 
     print()
-    print_msg("  [ Status ]", 'green')
-    print_msg("  ├─ Endpoint : {}".format(API_URL), 'white')
-    print_msg("  ├─ Model    : {}".format(MODEL), 'white')
-    print_msg("  ├─ Safe Mode: ENABLED (whitelist + human approval)", 'yellow')
-    print_msg("  └─ Allowed  : /home, /var/log, /etc, /tmp, /app, ...")
+    print_msg("  ┌────────────┬──────────────────────────────────────────────┐", 'white')
+    print_msg("  │ Endpoint   │ {}".format(API_URL), 'white')
+    print_msg("  │ Model      │ {}".format(MODEL), 'white')
+    print_msg("  │ Safe Mode  │ ENABLED — whitelist + human approval", 'yellow')
+    print_msg("  │ Allowed    │ /home, /var/log, /etc, /tmp, /app, ...", 'white')
+    print_msg("  └────────────┴──────────────────────────────────────────────┘", 'white')
     print()
-    print_msg("  Type 'quit' or 'exit' to exit | 'help' for usage", 'cyan')
+    print_msg("  Type 'quit' to exit | 'help' for usage", 'cyan')
     print()
 
 def main():
@@ -1056,6 +1057,15 @@ def main():
 2. 不要执行 rm, chmod, chown 等危险命令
 3. 发现问题后给出分析和解决建议
 
+输出格式要求（终端显示，禁止 Markdown 语法）：
+- 禁止使用 Markdown 表格（| --- | 这种），用等宽空格对齐代替
+- 禁止使用 ** 加粗、## 标题、` 代码块等 Markdown 标记
+- 禁止使用 --- 分隔线（会被终端误解析）
+- 用 ASCII 分隔符（如 +---+---+ 或 =====）代替
+- 用缩进（两个空格）表示层级
+- 列表用 - 或数字
+- 中文输出，简洁直接
+
 当前工作目录: {}
 
 当前用户: {}
@@ -1071,8 +1081,7 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
     while True:
         try:
             # 获取用户输入
-            print("[你]")
-            user_input = input().strip()
+            user_input = input("> ").strip()
         except (KeyboardInterrupt, EOFError):
             print_info("\n再见!")
             break
@@ -1082,32 +1091,68 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
 
         if user_input.lower() in ['quit', 'exit', 'q']:
             print_info("再见!")
-            print_warn("提醒：排查结束后建议删除 agent.py 避免 API Key 泄露：rm -f agent.py")
+            print_msg("  Tip: 排查结束后建议删除 agent.py 避免 API Key 泄露", 'yellow')
             break
+
+        if user_input.lower() == 'help':
+            print_msg("""
+  ┌─ Usage ──────────────────────────────────────────────────────┐
+  │  直接输入问题，Agent 会分析并给出排查建议                       │
+  │  输入 '执行' 或 '帮我运行' 让 Agent 执行命令                    │
+  │                                                              │
+  │  Available Tools                                             │
+  │    read_file     — 读取文件内容（日志、配置、代码）             │
+  │    run_command   — 执行 Linux 命令（白名单 + 人工确认）         │
+  │    list_directory — 列出目录结构                              │
+  │    env_snapshot  — 一键收集环境快照（主机名/IP/内存/磁盘/进程）  │
+  │                                                              │
+  │  Commands                                                    │
+  │    quit / exit / q  — 退出                                   │
+  │    help             — 显示此帮助                              │
+  └──────────────────────────────────────────────────────────────┘
+""", 'cyan')
+            continue
 
         try:
             # 添加用户消息
             messages.append({"role": "user", "content": user_input})
+            print_msg("  " + "\u2500" * 60, 'white')  # 每轮开始的分隔线
 
             # 主循环：处理可能的多次 tool_calls
             max_tool_rounds = 10  # 防止无限循环
             for round_num in range(max_tool_rounds):
-                # 消息滑动窗口：超过 MAX_MESSAGES 时保留 system prompt + 最近消息
+                # 上下文压缩：超过 MAX_MESSAGES 时，用 LLM 摘要替代旧消息
                 if len(messages) > MAX_MESSAGES:
                     system_msg = messages[0]  # 保留 system prompt
-                    recent = messages[-(MAX_MESSAGES - 1):]
+                    # 保留最近 COMPRESS_KEEP_RECENT 条，其余压缩
+                    split_point = max(1, len(messages) - COMPRESS_KEEP_RECENT)
+                    old_msgs = messages[1:split_point]  # 排除 system prompt
+                    recent = messages[split_point:]
+
+                    print_msg("\n  --- 上下文压缩中 ({} 条消息 → 保留最近 {} 条 + LLM 摘要) ---".format(
+                        len(messages), len(recent)), 'yellow')
+
+                    summary = compress_history(old_msgs)
+
                     messages.clear()
                     messages.append(system_msg)
-                    # 添加一条摘要提示
-                    messages.append({
-                        "role": "user",
-                        "content": "[系统提示: 之前的对话轮次过多，已自动压缩。请基于当前上下文继续排查]"
-                    })
+                    if summary:
+                        messages.append({
+                            "role": "user",
+                            "content": "[历史摘要] 以下是之前排查过程的摘要，请基于这些信息继续：\n\n" + summary
+                        })
+                        print_success("上下文压缩完成，摘要 {} 字".format(len(summary)))
+                    else:
+                        # 压缩失败，降级为简单提示
+                        messages.append({
+                            "role": "user",
+                            "content": "[系统提示: 之前的对话轮次过多，已自动压缩。请基于当前上下文继续排查]"
+                        })
+                        print_warn("压缩失败，已降级为简单截断")
                     messages.extend(recent)
-                    print_warn("对话轮次过多，已自动压缩上下文（保留最近 {} 条消息）".format(MAX_MESSAGES))
 
                 # 调用 LLM
-                print_msg("\n[思考中...]", 'magenta')
+                print_msg("\n  \u00b7\u00b7\u00b7 thinking \u00b7\u00b7\u00b7", 'magenta')
 
                 result, error = call_llm(messages, tools)
 
@@ -1135,8 +1180,9 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
                     assistant_reply = message.get('content', '')
                     if assistant_reply:
                         messages.append(message)
-                        print_msg("\n[助手]", 'green')
-                        print(assistant_reply)
+                        print_msg("\n  " + "\u2500" * 58, 'green')
+                        print(strip_markdown(assistant_reply))
+                        print_msg("  " + "\u2500" * 58, 'green')
                     break
 
                 # 有 tool_calls，需要处理
@@ -1146,9 +1192,18 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
                     func_name = tool_call['function']['name']
                     func_args = json.loads(tool_call['function']['arguments'])
 
-                    print_msg("\n[调用工具: {}]".format(func_name), 'yellow')
                     if func_name == 'run_command':
-                        print_msg("命令: " + func_args.get('command', ''), 'white')
+                        detail = func_args.get('command', '')
+                    elif func_name == 'read_file':
+                        detail = func_args.get('filepath', '')
+                    elif func_name == 'list_directory':
+                        detail = func_args.get('path', '.')
+                    else:
+                        detail = ''
+                    if detail:
+                        print_msg("\n  [{}] {}".format(func_name, detail), 'yellow')
+                    else:
+                        print_msg("\n  [{}]".format(func_name), 'yellow')
 
                     # 执行工具
                     tool_result = execute_tool(func_name, func_args)
@@ -1161,7 +1216,7 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
                     })
 
                     # 终端显示（较短截断）
-                    print_msg("\n[工具结果]", 'green')
+                    print_msg("  " + "\u2500" * 58, 'white')
                     display_text = tool_result[:MAX_DISPLAY_CHARS]
                     if len(tool_result) > MAX_DISPLAY_CHARS:
                         display_text += "\n...(结果过长，终端已截断，完整内容已送给 LLM)"
