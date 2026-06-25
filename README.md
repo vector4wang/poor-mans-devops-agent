@@ -46,12 +46,16 @@
 
 > 把 `agent.py` 扔进容器，配好公司内网的 LLM 地址，就能用自然语言和 AI 对话式排查问题。
 
-它不是要替代专业运维工具，而是给**开发人员**、**测试人员**、**值班但非运维背景的同学**提供一个"能聊天的排查助手"——你描述问题，它告诉你该跑什么命令，甚至直接帮你执行和分析结果。
+它不是要替代专业运维工具，而是给**开发人员**、**测试人员**、**值班但非运维背景的同学**提供一个"能聊天的排查助手"——你描述现象，它像运维工程师一样先形成假设、再用最小命令验证、逐步收敛到根因，并直接帮你执行和分析结果。
 
 ```
 你：服务响应很慢，帮我看看
-Agent：[自动执行 docker stats / ps / netstat]
-       CPU 占用 89%，疑似 GC 停顿。建议执行 jstack 抓线程快照...
+Agent：先形成假设——① GC 停顿 ② IO 瓶颈
+       一条命令验证①：
+       $ top
+       CPU 89%、内存 45%，假设①命中。继续深挖线程：
+       $ docker exec <c> py-spy dump --pid 1
+       疑似 GC 停顿，建议抓线程快照定位死循环...
 ```
 
 ---
@@ -88,15 +92,41 @@ python agent.py
 # 启动后会提示你输入 API 地址和 Key
 ```
 
+### 方式四：命令行参数传值（适合自动化 / CI）
+
+```bash
+python agent.py \
+  --api-url https://your-internal-llm/v1/chat/completions \
+  --api-key sk-xxxxx \
+  --model deepseek-chat
+```
+
+参数齐全时直接进入主循环，不进行任何交互；配置不全时自动回落到环境变量，再回落到引导式输入。若希望配置不全即报错（不等待输入），加 `--non-interactive`。
+
 ---
 
 ## ⚙️ 配置
+
+配置优先级：**命令行参数 > 环境变量 > 引导式输入**（缺失项逐级回落，三项可任意混用）。
+
+| 参数 | 环境变量 | 说明 |
+|------|----------|------|
+| `-u`, `--api-url` | `DEBUGBOT_API_URL` | LLM API 地址 |
+| `-k`, `--api-key` | `DEBUGBOT_API_KEY` | API Key |
+| `-m`, `--model` | `DEBUGBOT_MODEL` | 模型名称（默认 `gpt-4o`） |
+| `-n`, `--non-interactive` | — | 非交互模式，配置不全直接报错退出 |
+| `--no-stream` | `DEBUGBOT_STREAM=0` | 禁用流式输出（默认开启） |
+| — | `DEBUGBOT_WORKSPACE` | 工作区目录（默认 agent.py 旁 `debugbot-workspace/`，存记忆与临时脚本） |
+| `--debug` | — | 调试模式，打印发送给 LLM 的消息 |
+| `-h`, `--help` | — | 查看帮助 |
 
 | 环境变量 | 说明 | 示例 |
 |----------|------|------|
 | `DEBUGBOT_API_URL` | LLM API 地址 | `https://your-llm/v1/chat/completions` |
 | `DEBUGBOT_API_KEY` | API Key | `sk-xxxxx` |
 | `DEBUGBOT_MODEL` | 模型名称 | `deepseek-chat`, `gpt-4o`, `qwen-turbo` |
+| `DEBUGBOT_STREAM` | 流式输出开关 | `1`/`0`（默认 `1`） |
+| `DEBUGBOT_WORKSPACE` | 工作区目录 | `./debugbot-workspace` |
 
 **支持的模型**：任何 OpenAI 兼容 API 均可使用。
 
@@ -111,10 +141,34 @@ python agent.py
 
 | 工具 | 说明 |
 |------|------|
-| `read_file` | 读取文件内容（自动截断大文件，保留首尾） |
+| `read_file` | 读取文件内容（自动截断大文件，保留首尾；可读工作区记忆/脚本） |
 | `run_command` | 执行命令（白名单校验 + 危险命令拦截 + 人工确认） |
+| `write_file` | 写文件到工作区（持久化记忆或临时脚本） |
 | `list_directory` | 列出目录结构 |
 | `env_snapshot` | **一键环境快照**（主机名/IP/内存/磁盘/进程/端口/环境变量） |
+| `todo_write` | 任务列表（多步排查时跟踪进度，借鉴 Claude Code 的 TodoWrite） |
+
+> 融入 Claude Code 的核心逻辑：**流式输出**（边生成边显示）、**LLM 摘要式上下文压缩**（长对话不丢语义）、**TodoWrite 任务追踪**、**富系统提示**（注入平台/git/工具用法 + 持久化记忆）、**斜杠命令**、**工作区**（记忆 + 临时脚本落盘）。单文件、零依赖、Python 2.7+/3.x 通用。
+
+### 工作区：记忆与临时脚本
+
+agent.py 旁自动创建固定工作区目录（跨会话累积，可用 `DEBUGBOT_WORKSPACE` 覆盖）：
+
+```
+debugbot-workspace/
+├─ memories/            # 跨会话持久化记忆（Claude Code 风格）
+│  ├─ MEMORY.md         # 索引（每条一行，自动维护）
+│  └─ oom-threshold.md  # 带 frontmatter 的单条记忆
+└─ scripts/
+   └─ 20260624_153012/  # 本次会话的临时脚本（按时间戳隔离）
+      └─ probe.py
+```
+
+- **记忆**：排查中 LLM 用 `write_file` 写 `memories/xxx.md`（带 `name`/`description`/`type` frontmatter），程序自动维护 `MEMORY.md` 索引；下次启动索引拼进系统提示，具体内容按需 `read_file` 读取。
+- **临时脚本**：LLM 生成的探针/分析脚本写到 `scripts/本次会话/`，避免不同会话互相覆盖；写回的绝对路径会返回给 LLM，便于后续 `run_command` 执行（执行生成的脚本仍需人工确认）。
+- 路径限制在工作区内，防 `../` 逃逸。
+
+
 
 ### 支持的命令分类
 
@@ -127,6 +181,60 @@ python agent.py
 | K8s | `get`, `describe`, `logs`, `top`, `events`, `cluster-info` |
 | 数据库 | MySQL, PostgreSQL, Redis（只读查询） |
 | 中间件 | RabbitMQ, Kafka, ZooKeeper, etcd |
+
+### 多行输入（粘贴日志 / 堆栈 / 配置）
+
+交互模式下 `input()` 只读到第一个换行，直接粘贴多行内容会被逐行拆成多条输入。用 `"""` 包裹即可把整段内容作为一条消息发送，中间的空行会被保留：
+
+```
+[你]
+"""
+服务报错：
+Traceback (most recent call last):
+  File "app.py", line 10, in <module>
+    ...
+"""            <- 以单独一行 """ 结束并发送
+
+[思考中...]
+```
+
+- 单行照旧：输入回车即发送，行为不变。
+- 多行：第一行单独输入 `"""`（或 `'''`）进入多行模式，再单独输入同样的引号结束；中途 `Ctrl-C` 可取消。
+
+### 斜杠命令
+
+| 命令 | 说明 |
+|------|------|
+| `/help` | 显示帮助 |
+| `/quit` `/exit` | 退出（等同 `quit`/`exit`） |
+| `/clear` | 清空对话历史，仅保留系统提示 |
+| `/compact` | 立即用 LLM 摘要压缩当前上下文 |
+| `/snapshot` | 一键采集环境快照 |
+| `/todo` | 查看当前任务列表 |
+| `/tools` | 列出可用工具 |
+| `/workspace` | 显示工作区目录与记忆索引 |
+
+对话超过 `COMPACT_THRESHOLD`（默认 30 条）会自动触发摘要压缩；也可随时 `/compact` 手动触发，或 `/clear` 重开。
+
+### 流式输出
+
+默认开启流式，助手回复边生成边显示（打字机效果），工具调用拼装完成后才展示。某些 OpenAI 兼容端点不支持流式，可用 `--no-stream` 或环境变量 `DEBUGBOT_STREAM=0` 关闭后回退整段返回。
+
+### 与 Claude Code 的区别：大而美 vs 小而精
+
+本项目借鉴了 Claude Code 的核心逻辑，但定位完全不同——不是要复刻它，而是做一个**扔进容器就能跑**的轻量排查助手。
+
+| 维度 | Claude Code | Poor Man's DevOps Agent |
+|------|-------------|--------------------------|
+| 定位 | 大而全的 AI 编程 Agent | 小而精的生产排查助手 |
+| 形态 | 完整 TUI 应用 + 插件生态 | **单文件**，scp 进容器即用 |
+| 依赖 | 需安装 CLI、node 生态 | **零依赖**，标准库即可 |
+| 模型 | 绑定 Claude API | 任意 **OpenAI 兼容** API |
+| 范围 | 读/写/重构代码、跨文件工程 | **只读排查**，聚焦进程/日志/网络诊断 |
+| 扩展 | MCP、子 Agent、Skills、Hooks | 内建斜杠命令 + 工作区记忆 |
+| 场景 | 日常开发主工具 | 进容器临时排查完即删 |
+
+> Claude Code 是日常开发的主力工具；本项目是**应急时塞进容器的那一个脚本**——借鉴它的思考方式，但只为"排查"这一件事做到极致轻。排查完建议删除，避免 API Key 泄露。
 
 ---
 
@@ -144,25 +252,28 @@ python agent.py
 
 ## 💬 使用示例
 
+agent 采用「假设 → 验证 → 收敛」的诊断方法论：先形成 1-2 个可能原因，用最小只读命令逐个验证，命中则深挖、未中则换假设。回复直接以终端纯文本输出（不用 Markdown）。
+
 ```
 [你] 帮我看看这个容器为什么 CPU 这么高
 
 [思考中...]
 
 [调用工具: env_snapshot]
-== 内存使用 ==
-              total    used    free
-Mem:          7.8G    6.2G    1.6G
-
 == 进程列表（按内存排序 Top 20）==
 USER   PID  %CPU %MEM  COMMAND
 root   1    89.2 45.3  python app.py
 
-[助手] CPU 89%，内存占 45%，进程是 python app.py。
-       可能是：
-       1. 内存泄漏导致频繁 GC
-       2. 死循环
-       建议执行：docker exec <container> py-spy dump --pid 1
+[助手]
+── 可能原因 ──────────
+• 内存泄漏导致频繁 GC（CPU+内存双高，优先验证）
+• 死循环
+一条命令验证假设①：
+  $ docker exec <c> py-spy dump --pid 1
+
+[你] 执行
+[助手] 抓到线程停在 gc.collect，假设①命中。根因是内存泄漏触发频繁 GC，
+       建议查看 app.py 的对象缓存逻辑，并已把该服务的 OOM 阈值写入记忆。
 ```
 
 ---
