@@ -384,6 +384,57 @@ COMMAND_TIMEOUT = 30         # 命令超时秒数
 MAX_MESSAGES = 30            # 消息滑动窗口大小（超过后压缩）
 COMPRESS_KEEP_RECENT = 10   # 压缩时保留最近 N 条消息，其余用 LLM 摘要替代
 
+# ============== 工作区 ==============
+
+def setup_workspace():
+    """创建并返回工作区路径（debugbot-workspace/memories + scripts/）"""
+    base = os.environ.get('DEBUGBOT_WORKSPACE', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debugbot-workspace'))
+    for sub in ['memories', 'scripts']:
+        path = os.path.join(base, sub)
+        if not os.path.exists(path):
+            os.makedirs(path)
+    return base
+
+WORKSPACE = setup_workspace()
+
+# 全局任务列表（todo_write 工具维护）
+TODO_LIST = []
+
+# 本次会话 ID（用于 scripts/ 按时间戳隔离）
+SESSION_ID = time.strftime('%Y%m%d_%H%M%S')
+
+def _update_memory_index(filepath, content):
+    """自动维护 MEMORY.md 索引：从 memory 文件的 frontmatter 提取 name/description"""
+    import re as _re
+    memory_index = os.path.join(WORKSPACE, 'memories', 'MEMORY.md')
+    # 提取 frontmatter
+    name = os.path.basename(filepath).rsplit('.', 1)[0]
+    description = ""
+    m = _re.search(r'description:\s*(.+)', content)
+    if m:
+        description = m.group(1).strip()
+    entry = "- [{}]({}) — {}".format(name, os.path.basename(filepath), description or name)
+
+    # 读取现有索引
+    existing = []
+    if os.path.exists(memory_index):
+        with open(memory_index, 'r', encoding='utf-8', errors='ignore') as f:
+            existing = [l.rstrip() for l in f.readlines() if l.strip()]
+
+    # 更新或追加（按文件名去重）
+    basename = os.path.basename(filepath)
+    updated = False
+    for i, line in enumerate(existing):
+        if basename in line:
+            existing[i] = entry
+            updated = True
+            break
+    if not updated:
+        existing.append(entry)
+
+    with open(memory_index, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(existing) + '\n')
+
 # ============== 工具函数 ==============
 
 def truncate_output(text, max_chars=MAX_TOOL_CONTENT):
@@ -646,8 +697,8 @@ def request_confirmation(cmd, tool_name):
 
 # ============== LLM API 调用 ==============
 
-def call_llm(messages, tools=None, temperature=0.7, max_tokens=None):
-    """调用 LLM API"""
+def call_llm(messages, tools=None, temperature=0.7, max_tokens=None, stream=False):
+    """调用 LLM API（支持 streaming 实时输出）"""
     headers = {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ' + API_KEY
@@ -672,15 +723,19 @@ def call_llm(messages, tools=None, temperature=0.7, max_tokens=None):
         for i, msg in enumerate(messages):
             role = msg.get('role')
             tc = msg.get('tool_calls')
-            print_msg(f"  [{i}] role={role}, has_tool_calls={bool(tc)}", 'white')
+            print_msg("  [{}] role={}, has_tool_calls={}".format(i, role, bool(tc)), 'white')
             if tc:
                 for t in tc:
-                    print_msg(f"      -> id={t.get('id')}, func={t['function']['name']}", 'white')
+                    print_msg("      -> id={}, func={}".format(t.get('id'), t['function']['name']), 'white')
             if role == 'tool':
-                print_msg(f"      -> tool_call_id={msg.get('tool_call_id')}, content_len={len(msg.get('content',''))}", 'white')
+                print_msg("      -> tool_call_id={}, content_len={}".format(msg.get('tool_call_id'), len(msg.get('content',''))), 'white')
 
     if tools:
         payload['tools'] = tools
+
+    if stream:
+        payload['stream'] = True
+        return _call_llm_stream(headers, payload)
 
     data = json.dumps(payload).encode('utf-8')
 
@@ -714,6 +769,100 @@ def call_llm(messages, tools=None, temperature=0.7, max_tokens=None):
                 time.sleep(2 ** attempt)
                 continue
             return None, "Error: " + str(e)
+
+
+def _call_llm_stream(headers, payload):
+    """SSE streaming 调用：实时打印内容，返回累积的完整结果"""
+    data = json.dumps(payload).encode('utf-8')
+
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+
+    try:
+        req = Request(API_URL, data=data, headers=headers)
+        response = urlopen(req, timeout=120, context=ssl_context)
+
+        accumulated_content = ""
+        accumulated_tool_calls = {}  # index -> {id, function: {name, arguments}}
+        finish_reason = None
+        first_content = True
+
+        for line in response:
+            line = line.decode('utf-8').strip()
+            if not line:
+                continue
+            if line.startswith('data: '):
+                data_str = line[6:]
+                if data_str == '[DONE]':
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                    choices = chunk.get('choices', [])
+                    if not choices:
+                        continue
+                    delta = choices[0].get('delta', {})
+
+                    # 内容增量 — 实时打印
+                    if 'content' in delta and delta['content']:
+                        content_piece = delta['content']
+                        if first_content:
+                            print()  # 在首个内容块前换行
+                            first_content = False
+                        sys.stdout.write(strip_markdown(content_piece))
+                        sys.stdout.flush()
+                        accumulated_content += content_piece
+
+                    # 工具调用增量 — 跨 chunk 累积
+                    if 'tool_calls' in delta:
+                        for tc in delta['tool_calls']:
+                            idx = tc.get('index', 0)
+                            if idx not in accumulated_tool_calls:
+                                accumulated_tool_calls[idx] = {
+                                    'id': '',
+                                    'function': {'name': '', 'arguments': ''}
+                                }
+                            tc_acc = accumulated_tool_calls[idx]
+                            if 'id' in tc and tc['id']:
+                                tc_acc['id'] = tc['id']
+                            if 'function' in tc:
+                                if 'name' in tc['function'] and tc['function']['name']:
+                                    tc_acc['function']['name'] = tc['function']['name']
+                                if 'arguments' in tc['function']:
+                                    tc_acc['function']['arguments'] += tc['function']['arguments']
+
+                    if choices[0].get('finish_reason'):
+                        finish_reason = choices[0]['finish_reason']
+
+                except json.JSONDecodeError:
+                    continue
+
+        # 构造与非 streaming 一致的返回格式
+        message = {"role": "assistant", "content": accumulated_content}
+        if accumulated_tool_calls:
+            tool_calls_list = []
+            for idx in sorted(accumulated_tool_calls.keys()):
+                tc = accumulated_tool_calls[idx]
+                tool_calls_list.append({
+                    'id': tc['id'],
+                    'type': 'function',
+                    'function': tc['function']
+                })
+            message['tool_calls'] = tool_calls_list
+
+        result = {
+            'choices': [{
+                'message': message,
+                'finish_reason': finish_reason or 'stop'
+            }]
+        }
+        return result, None
+
+    except HTTPError as e:
+        error_body = e.read().decode('utf-8') if hasattr(e, 'read') else ''
+        return None, "HTTP Error {}: {}".format(e.code, error_body)
+    except Exception as e:
+        return None, "Stream Error: " + str(e)
 
 # ============== 上下文压缩 ==============
 
@@ -831,6 +980,53 @@ def get_tools():
                     }
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "在工作区内写入文件（记忆、临时脚本等）。文件只能写入 debugbot-workspace 目录内，禁止写入外部路径。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filepath": {
+                            "type": "string",
+                            "description": "文件路径（相对于工作区或绝对路径，自动限制在工作区内）"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "要写入的文件内容"
+                        }
+                    },
+                    "required": ["filepath", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "todo_write",
+                "description": "创建和管理任务列表，用于跟踪多步排查进度。任务以 JSON 格式在内部维护，支持创建、标记完成、查看。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["add", "complete", "list"],
+                            "description": "操作: add(添加任务), complete(标记完成), list(查看所有)"
+                        },
+                        "task": {
+                            "type": "string",
+                            "description": "任务描述 (add 时必填)"
+                        },
+                        "task_id": {
+                            "type": "integer",
+                            "description": "任务编号 (complete 时必填)"
+                        }
+                    },
+                    "required": ["action"]
+                }
+            }
         }
     ]
 
@@ -901,6 +1097,70 @@ def execute_tool(tool_name, tool_input):
         include_net = tool_input.get("include_network", True)
         return run_env_snapshot(include_proc, include_net)
 
+    elif tool_name == "write_file":
+        filepath = tool_input.get("filepath", "")
+        content = tool_input.get("content", "")
+
+        if not filepath:
+            return "文件路径为空"
+
+        # 如果传的是相对路径，拼到工作区下
+        if not filepath.startswith('/'):
+            # scripts/ 下的文件自动路由到本次会话子目录
+            if filepath.startswith('scripts/') or filepath.startswith('scripts\\'):
+                rel = filepath[len('scripts/'):] if filepath.startswith('scripts/') else filepath[len('scripts\\'):]
+                filepath = os.path.join(WORKSPACE, 'scripts', SESSION_ID, rel)
+            else:
+                filepath = os.path.join(WORKSPACE, filepath)
+        else:
+            # 绝对路径：校验是否在工作区内，不在则拒接（防 ../ 逃逸）
+            abs_path = os.path.abspath(filepath)
+            ws_abs = os.path.abspath(WORKSPACE)
+            if not abs_path.startswith(ws_abs + os.sep) and abs_path != ws_abs:
+                return "文件路径不在工作区内: {}（仅允许写入 {}/）".format(filepath, WORKSPACE)
+
+        try:
+            # 确保父目录存在
+            parent = os.path.dirname(os.path.abspath(filepath))
+            if not os.path.exists(parent):
+                os.makedirs(parent)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+            # 自动维护 MEMORY.md 索引：写入 memories/ 目录时更新索引
+            abs_path = os.path.abspath(filepath)
+            memories_dir = os.path.join(WORKSPACE, 'memories')
+            if abs_path.startswith(memories_dir + os.sep) and os.path.basename(filepath) != 'MEMORY.md':
+                _update_memory_index(filepath, content)
+            return "文件已写入: {}".format(filepath)
+        except Exception as e:
+            return "写入文件失败: {}".format(str(e))
+
+    elif tool_name == "todo_write":
+        action = tool_input.get("action", "list")
+        if action == "add":
+            task = tool_input.get("task", "")
+            if not task:
+                return "任务描述不能为空"
+            tid = len(TODO_LIST) + 1
+            TODO_LIST.append({"id": tid, "task": task, "status": "pending"})
+            return "已添加任务 #{}: {}".format(tid, task)
+        elif action == "complete":
+            tid = tool_input.get("task_id", 0)
+            for t in TODO_LIST:
+                if t["id"] == tid:
+                    t["status"] = "completed"
+                    return "任务 #{} 已完成: {}".format(tid, t["task"])
+            return "未找到任务 #{}".format(tid)
+        elif action == "list":
+            if not TODO_LIST:
+                return "任务列表为空"
+            lines = []
+            for t in TODO_LIST:
+                mark = "x" if t["status"] == "completed" else " "
+                lines.append("  [{}] #{} {}".format(mark, t["id"], t["task"]))
+            return "\n".join(lines)
+        return "未知操作: {}".format(action)
+
     return "[未知工具: {}]".format(tool_name)
 
 def run_env_snapshot(include_processes=True, include_network=True):
@@ -961,9 +1221,11 @@ def setup_config():
     global API_URL, API_KEY, MODEL, ARGS
 
     parser = argparse.ArgumentParser(description="Poor Man's DevOps Agent")
-    parser.add_argument('--api-url', default=None, help='API endpoint')
-    parser.add_argument('--api-key', default=None, help='API key')
-    parser.add_argument('--model', default=None, help='Model name')
+    parser.add_argument('-u', '--api-url', default=None, help='API endpoint')
+    parser.add_argument('-k', '--api-key', default=None, help='API key')
+    parser.add_argument('-m', '--model', default=None, help='Model name')
+    parser.add_argument('-n', '--non-interactive', action='store_true', help='Non-interactive mode, exit on missing config')
+    parser.add_argument('--no-stream', action='store_true', help='Disable streaming output')
     parser.add_argument('--debug', action='store_true', help='Debug mode')
     ARGS = parser.parse_args()
 
@@ -996,8 +1258,11 @@ def setup_config():
     API_KEY = cli_key or env_key
     MODEL = cli_model or env_model or 'gpt-4o'
 
-    # 都没提供才走交互输入
+    # 都没提供才走交互输入，非交互模式直接报错退出
     if not API_URL or not API_KEY:
+        if ARGS.non_interactive:
+            print_error("API URL 和 API Key 不能为空! (非交互模式)")
+            sys.exit(1)
         print_info("请输入 API 配置（或设置环境变量 DEBUGBOT_API_URL / DEBUGBOT_API_KEY）")
         print()
         print_msg("  API Endpoint: ", 'white')
@@ -1016,10 +1281,12 @@ def setup_config():
     print_msg("  │ Endpoint   │ {}".format(API_URL), 'white')
     print_msg("  │ Model      │ {}".format(MODEL), 'white')
     print_msg("  │ Safe Mode  │ ENABLED — whitelist + human approval", 'yellow')
+    print_msg("  │ Stream     │ {}".format('ON (SSE)' if not ARGS.no_stream and os.environ.get('DEBUGBOT_STREAM', '1') != '0' else 'OFF'), 'white')
     print_msg("  │ Allowed    │ /home, /var/log, /etc, /tmp, /app, ...", 'white')
+    print_msg("  │ Workspace   │ {}".format(WORKSPACE), 'white')
     print_msg("  └────────────┴──────────────────────────────────────────────┘", 'white')
     print()
-    print_msg("  Type 'quit' to exit | 'help' for usage", 'cyan')
+    print_msg("  Type 'quit' to exit | 'help' or /help for usage | / 开头为斜杠命令", 'cyan')
     print()
 
 def main():
@@ -1041,8 +1308,10 @@ def main():
 可用工具：
 - read_file: 读取文件内容
 - run_command: 执行 Linux 命令
+- write_file: 写入工作区文件（记忆、探针脚本等），文件仅限写入工作区 ({})
 - list_directory: 列出目录
 - env_snapshot: 一键收集环境快照（主机名、IP、内存、磁盘、进程、端口等）
+- todo_write: 管理排查任务列表（add/complete/list），跟踪多步排查进度
 
 可用命令参考：
 - 查看日志: cat, tail, grep, journalctl, docker logs
@@ -1070,7 +1339,7 @@ def main():
 
 当前用户: {}
 
-Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.version.split()[0])
+Python 版本: {}""".format(WORKSPACE, os.getcwd(), os.environ.get('USER', 'unknown'), sys.version.split()[0])
 
     messages = [
         {"role": "system", "content": system_prompt}
@@ -1089,6 +1358,96 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
         if not user_input:
             continue
 
+        # 多行输入：以 """ 或 ''' 开头进入多行模式，单独一行同样的引号结束
+        if user_input in ('"""', "'''"):
+            quote = user_input
+            lines = []
+            print_msg("  (多行输入模式，输入 {} 结束)".format(quote), 'cyan')
+            while True:
+                try:
+                    line = input()
+                    if line.strip() == quote:
+                        break
+                    lines.append(line)
+                except (KeyboardInterrupt, EOFError):
+                    print_info("\n已取消多行输入")
+                    lines = []
+                    break
+            if lines:
+                user_input = "\n".join(lines)
+            else:
+                continue
+
+        if not user_input:
+            continue
+
+        # 斜杠命令
+        if user_input.startswith('/'):
+            cmd = user_input[1:].strip().lower()
+            if cmd in ['quit', 'exit', 'q']:
+                print_info("再见!")
+                break
+            elif cmd == 'help':
+                # 复用 help 显示
+                user_input = 'help'
+                # 继续走正常流程，但 help 不发给 LLM
+            elif cmd == 'clear':
+                messages.clear()
+                messages.append({"role": "system", "content": system_prompt})
+                print_success("对话历史已清空")
+                continue
+            elif cmd == 'compact':
+                # 手动触发压缩
+                if len(messages) > 3:
+                    system_msg = messages[0]
+                    old_msgs = messages[1:]
+                    print_msg("\n  --- 手动压缩中 ---", 'yellow')
+                    summary = compress_history(old_msgs)
+                    messages.clear()
+                    messages.append(system_msg)
+                    if summary:
+                        messages.append({"role": "user", "content": "[历史摘要]\n\n" + summary})
+                        print_success("压缩完成，摘要 {} 字".format(len(summary)))
+                    else:
+                        print_warn("压缩失败")
+                else:
+                    print_info("消息太少，无需压缩")
+                continue
+            elif cmd == 'snapshot':
+                print_msg("\n" + run_env_snapshot(), 'white')
+                continue
+            elif cmd == 'tools':
+                print_msg("""
+  Available Tools
+    read_file     — 读取文件内容
+    run_command   — 执行 Linux 命令
+    write_file     — 写入工作区文件
+    list_directory — 列出目录结构
+    env_snapshot  — 一键环境快照
+""", 'cyan')
+                continue
+            elif cmd == 'todo':
+                if not TODO_LIST:
+                    print_info("任务列表为空")
+                else:
+                    for t in TODO_LIST:
+                        mark = "[x]" if t["status"] == "completed" else "[ ]"
+                        color = 'green' if t["status"] == "completed" else 'white'
+                        print_msg("  {} #{} {}".format(mark, t["id"], t["task"]), color)
+                continue
+            elif cmd == 'workspace':
+                print_msg("""
+  Workspace: {}
+  ├─ memories/  ({} 条记忆)
+  └─ scripts/   ({} 个脚本)
+""".format(WORKSPACE,
+           len(os.listdir(os.path.join(WORKSPACE, 'memories'))) if os.path.exists(os.path.join(WORKSPACE, 'memories')) else 0,
+           len(os.listdir(os.path.join(WORKSPACE, 'scripts'))) if os.path.exists(os.path.join(WORKSPACE, 'scripts')) else 0), 'cyan')
+                continue
+            else:
+                print_warn("未知命令: /{}，输入 /help 查看可用命令".format(cmd))
+                continue
+
         if user_input.lower() in ['quit', 'exit', 'q']:
             print_info("再见!")
             print_msg("  Tip: 排查结束后建议删除 agent.py 避免 API Key 泄露", 'yellow')
@@ -1099,18 +1458,29 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
   ┌─ Usage ──────────────────────────────────────────────────────┐
   │  直接输入问题，Agent 会分析并给出排查建议                       │
   │  输入 '执行' 或 '帮我运行' 让 Agent 执行命令                    │
+  │  多行输入: 首行输入 \"\"\" 或 '''，以同样的引号行结束             │
   │                                                              │
-  │  Available Tools                                             │
+  │  Tools                                                       │
   │    read_file     — 读取文件内容（日志、配置、代码）             │
   │    run_command   — 执行 Linux 命令（白名单 + 人工确认）         │
+  │    write_file    — 写入工作区文件（记忆、脚本）                 │
+  │    todo_write    — 任务列表（多步排查进度跟踪）                 │
   │    list_directory — 列出目录结构                              │
   │    env_snapshot  — 一键收集环境快照（主机名/IP/内存/磁盘/进程）  │
   │                                                              │
-  │  Commands                                                    │
-  │    quit / exit / q  — 退出                                   │
-  │    help             — 显示此帮助                              │
+  │  Slash Commands                                              │
+  │    /help       — 显示帮助                                    │
+  │    /quit       — 退出                                       │
+  │    /clear      — 清空对话历史                                │
+  │    /compact    — 手动压缩上下文                               │
+  │    /snapshot   — 一键环境快照                                 │
+  │    /todo       — 查看任务列表                                 │
+  │    /tools      — 列出可用工具                                 │
+  │    /workspace  — 查看工作区状态                               │
+  │                                                              │
+  │  Workspace: {}         │
   └──────────────────────────────────────────────────────────────┘
-""", 'cyan')
+""".format(WORKSPACE), 'cyan')
             continue
 
         try:
@@ -1151,10 +1521,13 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
                         print_warn("压缩失败，已降级为简单截断")
                     messages.extend(recent)
 
-                # 调用 LLM
-                print_msg("\n  \u00b7\u00b7\u00b7 thinking \u00b7\u00b7\u00b7", 'magenta')
+                # 调用 LLM（默认 streaming，除非 --no-stream 或 DEBUGBOT_STREAM=0）
+                use_stream = not ARGS.no_stream and os.environ.get('DEBUGBOT_STREAM', '1') != '0'
 
-                result, error = call_llm(messages, tools)
+                if not use_stream:
+                    print_msg("\n  \u00b7\u00b7\u00b7 thinking \u00b7\u00b7\u00b7", 'magenta')
+
+                result, error = call_llm(messages, tools, stream=use_stream)
 
                 if error:
                     print_error("API 调用失败: " + error)
@@ -1180,9 +1553,13 @@ Python 版本: {}""".format(os.getcwd(), os.environ.get('USER', 'unknown'), sys.
                     assistant_reply = message.get('content', '')
                     if assistant_reply:
                         messages.append(message)
-                        print_msg("\n  " + "\u2500" * 58, 'green')
-                        print(strip_markdown(assistant_reply))
-                        print_msg("  " + "\u2500" * 58, 'green')
+                        if use_stream:
+                            # 流式模式：内容已在实时输出中打印，补换行
+                            print()
+                        else:
+                            print_msg("\n  " + "\u2500" * 58, 'green')
+                            print(strip_markdown(assistant_reply))
+                            print_msg("  " + "\u2500" * 58, 'green')
                     break
 
                 # 有 tool_calls，需要处理
