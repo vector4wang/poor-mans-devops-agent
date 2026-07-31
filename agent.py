@@ -28,9 +28,17 @@ import re
 import time
 import ssl
 import argparse
+import readline
 
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+
+# 关闭终端的 bracketed paste 模式，避免粘贴时前后插入 \e[200~ / \e[201~ 转义序列
+try:
+    readline.set_bracketed_paste(False)
+except (AttributeError, OSError):
+    # 老版本 Python / 非 GNU readline 环境（如 macOS libedit）可能不支持，忽略
+    pass
 
 # ============== 配置区 ==============
 API_URL = os.environ.get('DEBUGBOT_API_URL', 'https://your-api-url/v1/chat/completions')
@@ -387,8 +395,11 @@ COMPRESS_KEEP_RECENT = 10   # 压缩时保留最近 N 条消息，其余用 LLM 
 # ============== 工作区 ==============
 
 def setup_workspace():
-    """创建并返回工作区路径（debugbot-workspace/memories + scripts/）"""
-    base = os.environ.get('DEBUGBOT_WORKSPACE', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debugbot-workspace'))
+    """创建并返回工作区路径：agent.py 所在目录 / debugbot-workspace/（memories + scripts）
+
+    固定使用脚本自身所在目录作为根，避免环境变量漂移导致产物落到意外位置。
+    """
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debugbot-workspace')
     for sub in ['memories', 'scripts']:
         path = os.path.join(base, sub)
         if not os.path.exists(path):
@@ -448,26 +459,87 @@ def truncate_output(text, max_chars=MAX_TOOL_CONTENT):
                 len(text), head_size, tail_size)
             + text[-tail_size:])
 
+def terminal_render_markdown(text, streaming_chunk=False):
+    """把 Markdown 渲染成终端 ANSI 格式（替代原 strip_markdown）。
+
+    - 标题 (# ## ###)   -> 加粗 + 颜色（H1 青 / H2 蓝 / H3 黄）
+    - 粗体 (**x**)     -> ANSI 加粗
+    - 斜体 (*x*)       -> ANSI 斜体
+    - 行内代码 (`x`)   -> 青色
+    - 代码块 (``` ... ```) -> 灰色（仅非 chunk 模式处理，避免跨 chunk 截断）
+    - 引用 (> xxx)     -> 灰色竖线缩进
+    - 链接 [t](u)      -> t (u)
+    - 表格 |---|       -> 去分隔线，保留内容
+    - 水平线 ---       -> 灰色横线
+
+    参数：
+    - streaming_chunk=True：用于流式每个 chunk，仅做"行内安全"替换，不处理跨 chunk 语法（代码块）
+    - streaming_chunk=False：用于完整文本，全量渲染
+    """
+    if not text:
+        return text
+
+    is_tty = sys.stdout.isatty()
+
+    # 非 TTY（重定向到文件）时退化为"洗掉 markdown 标记"，避免 ANSI 污染文件
+    if not is_tty:
+        t = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+        t = re.sub(r'(?<!\*)\*([^\*\n]+?)\*(?!\*)', r'\1', t)
+        t = re.sub(r'`([^`\n]+)`', r'\1', t)
+        t = re.sub(r'^#{1,6}\s+', '', t, flags=re.MULTILINE)
+        t = re.sub(r'^\|[\s\-:|]+\|$', '', t, flags=re.MULTILINE)
+        t = re.sub(r'^\|(.+)\|$', r'  \1', t, flags=re.MULTILINE)
+        t = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1', t)
+        t = re.sub(r'\n{3,}', '\n\n', t)
+        return t.strip()
+
+    # ---- 代码块（整段处理，chunk 模式跳过以免不完整） ----
+    if not streaming_chunk:
+        def _render_code_block(m):
+            lang = m.group(1) or ''
+            code = m.group(2).rstrip('\n')
+            header = "\033[90m  [{}]\n".format(lang) if lang else ""
+            return "{}{}\033[0m".format(header, code)
+        text = re.sub(r'```(\w*)\n(.*?)```', _render_code_block, text, flags=re.DOTALL)
+        # 单独残留的 ``` 行（LLM 漏闭合）降级为灰色横线
+        text = re.sub(r'^```.*$', r'\033[90m' + '─' * 30 + '\033[0m', text, flags=re.MULTILINE)
+
+    # ---- 标题 ----
+    text = re.sub(r'^#{6}\s+(.+)$', r'\033[1;97m  \1\033[0m', text, flags=re.MULTILINE)
+    text = re.sub(r'^#{5}\s+(.+)$', r'\033[1;97m  \1\033[0m', text, flags=re.MULTILINE)
+    text = re.sub(r'^#{4}\s+(.+)$', r'\033[1;33m  \1\033[0m', text, flags=re.MULTILINE)
+    text = re.sub(r'^###{1}\s+(.+)$', r'\033[1;33m\1\033[0m', text, flags=re.MULTILINE)
+    text = re.sub(r'^##{1}\s+(.+)$',  r'\033[1;34m\1\033[0m', text, flags=re.MULTILINE)
+    text = re.sub(r'^#{1}\s+(.+)$',   r'\033[1;36m\1\033[0m', text, flags=re.MULTILINE)
+
+    # ---- 粗体 / 斜体 ----
+    text = re.sub(r'\*\*(.+?)\*\*', r'\033[1m\1\033[22m', text)
+    text = re.sub(r'(?<!\*)\*([^\*\n]+?)\*(?!\*)', r'\033[3m\1\033[23m', text)
+
+    # ---- 行内代码 ----
+    text = re.sub(r'`([^`\n]+)`', r'\033[36m\1\033[39m', text)
+
+    # ---- 引用 ----
+    text = re.sub(r'^>\s?(.+)$', r'\033[90m│ \1\033[0m', text, flags=re.MULTILINE)
+
+    # ---- 链接 [text](url) -> text (url) ----
+    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 \033[4;94m\2\033[0m', text)
+
+    # ---- 表格：去分隔行、保留内容 ----
+    text = re.sub(r'^\|[\s\-:|]+\|$', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^\|(.+)\|$', r'  \1', text, flags=re.MULTILINE)
+
+    # ---- 水平线 ----
+    text = re.sub(r'^[\-*=_]{3,}\s*$', r'\033[90m' + '─' * 40 + '\033[0m', text, flags=re.MULTILINE)
+
+    # ---- 合并多余空行 ----
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text
+
+
 def strip_markdown(text):
-    """洗掉 Markdown 语法，适合终端显示"""
-    import re as _re
-    # 去掉 **bold** 和 *italic*
-    text = _re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-    text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\1', text)
-    # 去掉 `code` 标记
-    text = _re.sub(r'`([^`]+)`', r'\1', text)
-    # 去掉 ## ### 标题标记
-    text = _re.sub(r'^#{1,6}\s+', '', text, flags=_re.MULTILINE)
-    # 去掉 Markdown 表格的 | 分隔线（保留内容）
-    # 先处理表头分隔行 |---|---| 这种
-    text = _re.sub(r'^\|[\s\-:|]+\|$', '', text, flags=_re.MULTILINE)
-    # 去掉表格每行的首尾 |
-    text = _re.sub(r'^\|(.+)\|$', r'  \1', text, flags=_re.MULTILINE)
-    # 去掉水平线 --- *** ===
-    text = _re.sub(r'^[\-*=_]{3,}\s*$', '', text, flags=_re.MULTILINE)
-    # 去掉多余空行
-    text = _re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
+    """向后兼容：旧调用点走渲染函数（非 chunk 模式）"""
+    return terminal_render_markdown(text, streaming_chunk=False)
 
 def print_msg(msg, color=None):
     """带颜色的打印"""
@@ -803,13 +875,13 @@ def _call_llm_stream(headers, payload):
                         continue
                     delta = choices[0].get('delta', {})
 
-                    # 内容增量 — 实时打印
+                    # 内容增量 — 实时打印 + 轻量 markdown 渲染（chunk 模式）
                     if 'content' in delta and delta['content']:
                         content_piece = delta['content']
                         if first_content:
                             print()  # 在首个内容块前换行
                             first_content = False
-                        sys.stdout.write(strip_markdown(content_piece))
+                        sys.stdout.write(terminal_render_markdown(content_piece, streaming_chunk=True))
                         sys.stdout.flush()
                         accumulated_content += content_piece
 
@@ -1326,13 +1398,11 @@ def main():
 2. 不要执行 rm, chmod, chown 等危险命令
 3. 发现问题后给出分析和解决建议
 
-输出格式要求（终端显示，禁止 Markdown 语法）：
-- 禁止使用 Markdown 表格（| --- | 这种），用等宽空格对齐代替
-- 禁止使用 ** 加粗、## 标题、` 代码块等 Markdown 标记
-- 禁止使用 --- 分隔线（会被终端误解析）
-- 用 ASCII 分隔符（如 +---+---+ 或 =====）代替
-- 用缩进（两个空格）表示层级
-- 列表用 - 或数字
+输出格式要求（终端会自动渲染 Markdown，请放心使用）：
+- 鼓励使用 Markdown 语法：标题（#/##/###）、**粗体**、*斜体*、`行内代码`、```代码块```、列表、表格、链接等
+- 表格直接用标准 Markdown 表格语法（| col | col |）
+- 代码块请标注语言（如 ```bash / ```python），终端会高亮显示
+- 引用用 > 开头
 - 中文输出，简洁直接
 
 当前工作目录: {}
@@ -1347,36 +1417,49 @@ Python 版本: {}""".format(WORKSPACE, os.getcwd(), os.environ.get('USER', 'unkn
 
     tools = get_tools()
 
+    # ============== REPL 主循环（参考 doris_shell.py 的交互风格） ==============
+    # - 简单无色 prompt: >  (续行用 ...> )
+    # - 多行模式以 """ 或 ''' 进入，单独一行同样引号结束
+    # - 通过 readline.set_bracketed_paste(False) 关闭粘贴包裹，避免粘贴出特殊字符
+    buf = ""
+    in_multiline = False
+    quote_marker = None
+    user_input = ""
+
     while True:
+        # ---------- 读取一行 ----------
         try:
-            # 获取用户输入
-            user_input = input("> ").strip()
+            if in_multiline:
+                line = input("...> ")
+            else:
+                line = input("> ")
         except (KeyboardInterrupt, EOFError):
             print_info("\n再见!")
             break
 
-        if not user_input:
-            continue
+        # 清洗 bracketed paste 残留的转义序列（兜底，防止某些终端不吃 readline 设置）
+        line = re.sub(r'\x1b\[\?200[0-9hl]|\x1b\[20[01]~', '', line)
 
-        # 多行输入：以 """ 或 ''' 开头进入多行模式，单独一行同样的引号结束
-        if user_input in ('"""', "'''"):
-            quote = user_input
-            lines = []
-            print_msg("  (多行输入模式，输入 {} 结束)".format(quote), 'cyan')
-            while True:
-                try:
-                    line = input()
-                    if line.strip() == quote:
-                        break
-                    lines.append(line)
-                except (KeyboardInterrupt, EOFError):
-                    print_info("\n已取消多行输入")
-                    lines = []
-                    break
-            if lines:
-                user_input = "\n".join(lines)
+        # ---------- 多行模式：累积到 quote_marker 行结束 ----------
+        if in_multiline:
+            if line.strip() == quote_marker:
+                user_input = buf.strip()
+                buf = ""
+                in_multiline = False
+                # fall through 处理 user_input
             else:
+                buf += line + "\n"
                 continue
+        else:
+            stripped = line.strip()
+            # 进入多行模式
+            if stripped in ('"""', "'''"):
+                in_multiline = True
+                quote_marker = stripped
+                buf = ""
+                print_msg("  (多行输入模式，单独一行 {} 结束)".format(quote_marker), 'cyan')
+                continue
+            user_input = stripped
 
         if not user_input:
             continue
