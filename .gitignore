@@ -15,3 +15,10 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# draw.io 临时文件
+.$*.dtmp
+*.bkp
+
+# agent 运行时产物
+debugbot-workspace/

