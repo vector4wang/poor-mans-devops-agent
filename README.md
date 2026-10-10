@@ -140,7 +140,6 @@ python agent.py \
 | `-m`, `--model` | `DEBUGBOT_MODEL` | 模型名称（默认 `gpt-4o`） |
 | `-n`, `--non-interactive` | — | 非交互模式，配置不全直接报错退出 |
 | `--no-stream` | `DEBUGBOT_STREAM=0` | 禁用流式输出（默认开启） |
-| — | `DEBUGBOT_WORKSPACE` | 工作区目录（默认 agent.py 旁 `debugbot-workspace/`，存记忆与临时脚本） |
 | `--debug` | — | 调试模式，打印发送给 LLM 的消息 |
 | `-h`, `--help` | — | 查看帮助 |
 
@@ -150,7 +149,6 @@ python agent.py \
 | `DEBUGBOT_API_KEY` | API Key | `sk-xxxxx` |
 | `DEBUGBOT_MODEL` | 模型名称 | `deepseek-chat`, `gpt-4o`, `qwen-turbo` |
 | `DEBUGBOT_STREAM` | 流式输出开关 | `1`/`0`（默认 `1`） |
-| `DEBUGBOT_WORKSPACE` | 工作区目录 | `./debugbot-workspace` |
 
 **支持的模型**：任何 OpenAI 兼容 API 均可使用。
 
@@ -176,7 +174,7 @@ python agent.py \
 
 ### 工作区：记忆与临时脚本
 
-agent.py 旁自动创建固定工作区目录（跨会话累积，可用 `DEBUGBOT_WORKSPACE` 覆盖）：
+agent.py 旁自动创建固定工作区目录（跨会话累积）：
 
 ```
 debugbot-workspace/
@@ -192,7 +190,34 @@ debugbot-workspace/
 - **临时脚本**：LLM 生成的探针/分析脚本写到 `scripts/本次会话/`，避免不同会话互相覆盖；写回的绝对路径会返回给 LLM，便于后续 `run_command` 执行（执行生成的脚本仍需人工确认）。
 - 路径限制在工作区内，防 `../` 逃逸。
 
+### Skill 扩展
 
+启动时自动扫描 `agent.py` 旁的 `skills/` 目录，加载每个子目录下的 `SKILL.md` 作为专家提示注入系统提示。
+
+```
+skills/
+└─ k8s-debug/
+   └─ SKILL.md
+```
+
+`SKILL.md` 格式：
+
+```markdown
+---
+name: k8s-debug
+description: Kubernetes 容器与 Pod 排查专家模式
+---
+
+你是 Kubernetes 排查专家，优先查看 namespace → pod → 日志 → 事件。
+```
+
+启动时会提示加载数量：
+
+```
+Loaded Skills (1): k8s-debug
+```
+
+运行时用 `/skills` 查看已加载列表。Skill 只注入提示，不新增工具函数，因此不会破坏安全边界。
 
 ### 支持的命令分类
 
@@ -236,6 +261,7 @@ Traceback (most recent call last):
 | `/snapshot` | 一键采集环境快照 |
 | `/todo` | 查看当前任务列表 |
 | `/tools` | 列出可用工具 |
+| `/skills` | 查看已加载的 Skill 列表 |
 | `/workspace` | 显示工作区目录与记忆索引 |
 
 对话超过 `COMPACT_THRESHOLD`（默认 30 条）会自动触发摘要压缩；也可随时 `/compact` 手动触发，或 `/clear` 重开。
@@ -350,9 +376,9 @@ root   1    89.2 45.3  python app.py
 
 | 循环 | 位置 | 作用 |
 |------|------|------|
-| **外层** Agent Loop | `while True` (line 1071) | 用户多轮对话，每轮一个完整排查任务 |
-| **内层** Tool-Calling Loop | `for round in 1..10` (line 1094) | 单轮内 LLM ↔ 工具多轮交互，直到 LLM 不再调用工具 |
-| **压缩** Context Compression | 内层入口 (line 1100) | 消息超阈值时 LLM 摘要压缩，不丢上下文 |
+| **外层** Agent Loop | `main()` 中的 REPL 循环 | 用户多轮对话，每轮一个完整排查任务 |
+| **内层** Tool-Calling Loop | `main()` 中的 `for round in range(max_tool_rounds)` | 单轮内 LLM ↔ 工具多轮交互，直到 LLM 不再调用工具 |
+| **压缩** Context Compression | 内层循环入口处 | 消息超阈值时 LLM 摘要压缩，不丢上下文 |
 
 ---
 

@@ -29,6 +29,7 @@ import time
 import ssl
 import argparse
 import readline
+import glob
 
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -44,6 +45,9 @@ except (AttributeError, OSError):
 API_URL = os.environ.get('DEBUGBOT_API_URL', 'https://your-api-url/v1/chat/completions')
 API_KEY = os.environ.get('DEBUGBOT_API_KEY', 'your-api-key')
 MODEL = os.environ.get('DEBUGBOT_MODEL', 'gpt-4o')
+
+# 全局已加载技能
+SKILLS = []
 
 # 禁止的命令模式
 FORBIDDEN_PATTERNS = [
@@ -154,6 +158,55 @@ TODO_LIST = []
 
 # 本次会话 ID（用于 scripts/ 按时间戳隔离）
 SESSION_ID = time.strftime('%Y%m%d_%H%M%S')
+
+# ============== 技能加载 ==============
+
+def load_skills(skills_dir='skills'):
+    """扫描 skills/ 目录，加载所有 SKILL.md 的 frontmatter 与内容。
+
+    每个 skill 目录结构：skills/<name>/SKILL.md
+    SKILL.md 可选 frontmatter:
+        ---
+        name: k8s-debug
+        description: Kubernetes 故障排查专家模式
+        ---
+    没有 frontmatter 时，默认使用目录名作为 name。
+    """
+    skills = []
+    if not os.path.isdir(skills_dir):
+        return skills
+
+    for path in sorted(glob.glob(os.path.join(skills_dir, '*', 'SKILL.md'))):
+        try:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                text = f.read()
+
+            meta = {}
+            content = text
+            # 简单 frontmatter 解析：零依赖，支持 --- 包裹的 YAML-like 键值对
+            if text.startswith('---'):
+                parts = text.split('---', 2)
+                if len(parts) >= 3:
+                    front = parts[1].strip()
+                    content = parts[2].strip()
+                    for line in front.splitlines():
+                        if ':' in line:
+                            k, v = line.split(':', 1)
+                            meta[k.strip().lower()] = v.strip()
+
+            name = meta.get('name') or os.path.basename(os.path.dirname(path))
+            description = meta.get('description', '')
+            skills.append({
+                'name': name,
+                'description': description,
+                'content': content,
+                'path': path,
+            })
+        except Exception:
+            # 单个 skill 加载失败不应影响启动
+            continue
+
+    return skills
 
 def _update_memory_index(filepath, content):
     """自动维护 MEMORY.md 索引：从 memory 文件的 frontmatter 提取 name/description"""
@@ -1140,6 +1193,15 @@ def setup_config():
     print_msg("  └──────────────┴───────────────────────────────────────────┘", 'white')
     print()
 
+    # 加载并展示 SKILL.md 技能
+    global SKILLS
+    SKILLS = load_skills()
+    if SKILLS:
+        print_msg("  Loaded Skills ({}): {}".format(len(SKILLS), ', '.join(s['name'] for s in SKILLS)), 'green')
+    else:
+        print_msg("  Loaded Skills: 0", 'cyan')
+    print()
+
     # 优先级: CLI args > env vars > 交互输入
     cli_url = ARGS.api_url
     cli_key = ARGS.api_key
@@ -1188,7 +1250,7 @@ def main():
     setup_config()
 
     # 系统提示 - 兼容模式（不强制使用工具）
-    system_prompt = """你是一个 Poor Man's DevOps Agent (乞丐版运维助手)，帮助用户排查生产环境问题。
+    base_prompt = """你是一个 Poor Man's DevOps Agent (乞丐版运维助手)，帮助用户排查生产环境问题。
 
 你是专业的运维工程师，熟悉 Linux 系统、Docker、Kubernetes、各种中间件和数据库。
 
@@ -1232,6 +1294,15 @@ def main():
 当前用户: {}
 
 Python 版本: {}""".format(WORKSPACE, os.getcwd(), os.environ.get('USER', 'unknown'), sys.version.split()[0])
+
+    # 注入已加载 skill 的提示内容
+    if SKILLS:
+        skill_sections = []
+        for s in SKILLS:
+            skill_sections.append("### Skill: {}\n{}".format(s['name'], s['content']))
+        system_prompt = base_prompt + "\n\n" + "\n\n".join(skill_sections)
+    else:
+        system_prompt = base_prompt
 
     messages = [
         {"role": "system", "content": system_prompt}
@@ -1349,6 +1420,14 @@ Python 版本: {}""".format(WORKSPACE, os.getcwd(), os.environ.get('USER', 'unkn
            len(os.listdir(os.path.join(WORKSPACE, 'memories'))) if os.path.exists(os.path.join(WORKSPACE, 'memories')) else 0,
            len(os.listdir(os.path.join(WORKSPACE, 'scripts'))) if os.path.exists(os.path.join(WORKSPACE, 'scripts')) else 0), 'cyan')
                 continue
+            elif cmd == 'skills':
+                if not SKILLS:
+                    print_info("当前未加载任何 Skill")
+                else:
+                    print_msg("  Loaded Skills ({}):".format(len(SKILLS)), 'cyan')
+                    for s in SKILLS:
+                        print_msg("    {} — {}".format(s['name'], s['description'] or '无描述'), 'white')
+                continue
             else:
                 print_warn("未知命令: /{}，输入 /help 查看可用命令".format(cmd))
                 continue
@@ -1381,6 +1460,7 @@ Python 版本: {}""".format(WORKSPACE, os.getcwd(), os.environ.get('USER', 'unkn
   │    /snapshot   — 一键环境快照                                 │
   │    /todo       — 查看任务列表                                 │
   │    /tools      — 列出可用工具                                 │
+  │    /skills     — 查看已加载的 Skill 列表                      │
   │    /workspace  — 查看工作区状态                               │
   │                                                              │
   │  Workspace: {}         │
