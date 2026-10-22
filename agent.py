@@ -30,6 +30,7 @@ import ssl
 import argparse
 import readline
 import glob
+import getpass
 
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -152,6 +153,24 @@ def setup_workspace():
     return base
 
 WORKSPACE = setup_workspace()
+
+# 命令行历史持久化文件（跨会话保留，便于复盘"刚才跑了什么"）
+HISTORY_FILE = os.path.join(WORKSPACE, '.history')
+
+def _load_readline_history():
+    """加载上次的 readline 历史；失败静默忽略（首次运行 / 文件损坏都不影响启动）"""
+    try:
+        readline.read_history_file(HISTORY_FILE)
+        readline.set_history_length(1000)
+    except (IOError, OSError):
+        pass
+
+def _save_readline_history():
+    """退出时把 readline 历史写回工作区"""
+    try:
+        readline.write_history_file(HISTORY_FILE)
+    except (IOError, OSError):
+        pass
 
 # 全局任务列表（todo_write 工具维护）
 TODO_LIST = []
@@ -395,7 +414,8 @@ def is_command_forbidden(cmd):
 
 # 安全只读命令（不需要确认直接执行）
 SAFE_READONLY_PATTERNS = [
-    # 文件读取
+    # 文件读取（tail -f / journalctl -fu 等长输出由 execute_command 30s 超时兜底，
+    # 超时后会把已收集到的部分输出返回给 LLM，不会再丢失）
     r'^cat\s+', r'^head\s+', r'^tail\s+', r'^grep\s+', r'^awk\s+',
     r'^sed\s+', r'^wc\s+', r'^sort\s+', r'^uniq\s+', r'^cut\s+',
     r'^less\s+', r'^more\s+', r'^zcat\s+', r'^zgrep\s+', r'^diff\s+',
@@ -422,8 +442,9 @@ SAFE_READONLY_PATTERNS = [
     # 性能监控
     r'^vmstat\s+', r'^iostat\s+', r'^mpstat\s+', r'^sar\s+',
     r'^iotop\s+', r'^iftop\s+',
-    # 日志查看
-    r'^journalctl\s+', r'^last\s+', r'^lastlog\s+', r'^faillog\s+',
+    # 日志查看（journalctl -u/-f/--since/--until 都常见；journalctl 默认走 pager，
+    # 但 subprocess 无 tty 时会自动退化为直出，不会卡住）
+    r'^journalctl\s*', r'^last\s+', r'^lastlog\s+', r'^faillog\s+',
     # Docker 只读
     r'^docker\s+ps\s+', r'^docker\s+logs\s+', r'^docker\s+images\s+',
     r'^docker\s+inspect\s+', r'^docker\s+stats\s+', r'^docker\s+top\s+',
@@ -439,11 +460,13 @@ SAFE_READONLY_PATTERNS = [
     r'^git\s+log\s+', r'^git\s+status\s+', r'^git\s+diff\s+',
     r'^git\s+show\s+', r'^git\s+branch\s+', r'^git\s+tag\s+',
     r'^git\s+remote\s+-v\s+', r'^git\s+stash\s+list\s+',
-    # 数据库只读
-    r'^mysql\s+.*-e\s+["\']\s*SELECT', r'^mysql\s+.*--execute\s+["\']\s*SELECT',
-    r'^psql\s+.*-c\s+["\']\s*SELECT', r'^redis-cli\s+GET\s+',
-    r'^redis-cli\s+SCAN\s+', r'^redis-cli\s+INFO\s+', r'^redis-cli\s+TYPE\s+',
-    r'^redis-cli\s+KEYS\s+', r'^redis-cli\s+TTL\s+',
+    # 数据库只读（不区分大小写：SELECT/select/SHOW/show/DESC/EXPLAIN 都放行；
+    # 仍禁止任何写操作——INSERT/UPDATE/DELETE/DROP/FLUSHALL/CONFIG SET 等不命中白名单）
+    r'(?i)^mysql\s+.*-e\s+["\']\s*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN)\b',
+    r'(?i)^mysql\s+.*--execute\s*=\s*["\']\s*(SELECT|SHOW|DESC|DESCRIBE|EXPLAIN)\b',
+    r'(?i)^psql\s+.*-c\s+["\']\s*(SELECT|SHOW|EXPLAIN)\b',
+    r'^psql\s+.*-c\s+["\']\s*\\d',  # psql 元命令 \d \dt \dv \di 等（只读描述）
+    r'(?i)^redis-cli\s+(GET|MGET|SCAN|INFO|TYPE|KEYS|TTL|PTTL|HGET|HGETALL|HMGET|HLEN|HEXISTS|SMEMBERS|SISMEMBER|SCARD|ZRANGE|ZREVRANGE|ZRANK|ZCARD|ZSCORE|LLEN|LRANGE|STRLEN|OBJECT|EXISTS|DBSIZE|RANDOMKEY|LASTSAVE|SLOWLOG)\b',
     # 其他只读
     r'^env\s+', r'^printenv\s+', r'^type\s+', r'^alias\s+', r'^history\s+',
     r'^cat\s+/proc/', r'^md5sum\s+', r'^sha256sum\s+',
@@ -615,6 +638,19 @@ def execute_command(cmd, timeout=COMMAND_TIMEOUT):
         return output if output else "[命令无输出]", None
     except subprocess.TimeoutExpired:
         process.kill()
+        # 尽量捞回超时前已经产生的输出（tail -f、慢查询等场景下这部分往往才是关键线索）
+        partial = ""
+        try:
+            partial_out, partial_err = process.communicate(timeout=1)
+            partial = partial_out.decode('utf-8', errors='ignore')
+            if partial_err:
+                err_text = partial_err.decode('utf-8', errors='ignore')
+                if err_text:
+                    partial += "\n[STDERR]\n" + err_text
+        except Exception:
+            pass
+        if partial.strip():
+            return partial + "\n\n[命令执行超时 ({}秒)，以上为已收集到的部分输出]".format(timeout), None
         return None, "命令执行超时 ({}秒)".format(timeout)
     except Exception as e:
         return None, str(e)
@@ -1223,8 +1259,8 @@ def setup_config():
         print()
         print_msg("  API Endpoint: ", 'white')
         API_URL = input("  > ").strip()
-        print_msg("  API Key:      ", 'white')
-        API_KEY = input("  > ").strip()
+        # API Key 用 getpass 不回显，避免在共享终端/录屏挑战赛场景中泄露
+        API_KEY = getpass.getpass("  API Key (输入不显示): ").strip()
         print_msg("  Model:        ", 'white')
         MODEL = input("  > ").strip() or 'gpt-4o'
 
@@ -1248,6 +1284,7 @@ def setup_config():
 def main():
     # 运行时配置
     setup_config()
+    _load_readline_history()
 
     # 系统提示 - 兼容模式（不强制使用工具）
     base_prompt = """你是一个 Poor Man's DevOps Agent (乞丐版运维助手)，帮助用户排查生产环境问题。
@@ -1328,6 +1365,7 @@ Python 版本: {}""".format(WORKSPACE, os.getcwd(), os.environ.get('USER', 'unkn
                 line = input("> ")
         except (KeyboardInterrupt, EOFError):
             print_info("\n再见!")
+            _save_readline_history()
             break
 
         # 清洗 bracketed paste 残留的转义序列（兜底，防止某些终端不吃 readline 设置）
@@ -1435,6 +1473,7 @@ Python 版本: {}""".format(WORKSPACE, os.getcwd(), os.environ.get('USER', 'unkn
         if user_input.lower() in ['quit', 'exit', 'q']:
             print_info("再见!")
             print_msg("  Tip: 排查结束后建议删除 agent.py 避免 API Key 泄露", 'yellow')
+            _save_readline_history()
             break
 
         if user_input.lower() == 'help':
@@ -1516,14 +1555,22 @@ Python 版本: {}""".format(WORKSPACE, os.getcwd(), os.environ.get('USER', 'unkn
 
                 if error:
                     print_error("API 调用失败: " + error)
-                    if round_num == 0:
-                        messages.pop()  # 第一轮失败，移除用户消息
+                    # 回滚到最近一个完整状态：丢弃所有半截的 tool/assistant 消息，
+                    # 以及触发本次失败的那个 user 消息，避免下次调用带着不完整的
+                    # tool_calls schema 把上下文越搞越脏。
+                    while messages and messages[-1].get('role') in ('tool', 'assistant'):
+                        messages.pop()
+                    if messages and messages[-1].get('role') == 'user':
+                        messages.pop()
                     break
 
                 # 处理响应
                 if 'choices' not in result or not result['choices']:
                     print_error("无效的 API 响应")
-                    if round_num == 0:
+                    # 同上的回滚逻辑
+                    while messages and messages[-1].get('role') in ('tool', 'assistant'):
+                        messages.pop()
+                    if messages and messages[-1].get('role') == 'user':
                         messages.pop()
                     break
 
